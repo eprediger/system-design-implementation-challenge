@@ -3,5 +3,3 @@ export type { Clock, RateLimitRule, RateLimitResult, Store, IncrementResult } fr
 export { CircuitBreaker } from './adapter/circuit-breaker';
 export type { CircuitBreakerOptions, CircuitState } from './adapter/circuit-breaker';
 export { MemoryStore } from './adapter/memory-store';
-export { rateLimitMiddleware } from './adapter/http';
-export type { MiddlewareOptions } from './adapter/http';

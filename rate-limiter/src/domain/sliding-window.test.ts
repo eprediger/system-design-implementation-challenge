@@ -2,7 +2,7 @@ import { SlidingWindowLimiter, type Store } from './sliding-window';
 import { MemoryStore } from '../adapter/memory-store';
 
 const windowMs = 60_000;
-const rule = { key: 'test', windowMs, maxRequests: 3 };
+const rule = { windowMs, maxRequests: 3 };
 
 describe('Given a sliding window rate limit rule', () => {
   let store: MemoryStore;
@@ -100,6 +100,17 @@ describe('Given a sliding window rate limit rule', () => {
       const result = await limiter.check('key', rule);
       // only 1 request in the far-right of window 1, previous window is fully expired
       expect(result.allowed).toBe(true);
+    });
+  });
+
+  describe('Given two distinct client identities sharing a rule', () => {
+    it('when one exhausts its allowance, then the other is unaffected', async () => {
+      await limiter.check('alice', rule);
+      await limiter.check('alice', rule);
+      await limiter.check('alice', rule);
+      const bobFirst = await limiter.check('bob', rule);
+      expect(bobFirst.allowed).toBe(true);
+      expect(bobFirst.remaining).toBe(2);
     });
   });
 

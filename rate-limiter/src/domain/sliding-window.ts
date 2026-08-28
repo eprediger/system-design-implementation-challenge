@@ -7,19 +7,16 @@ export interface Clock {
 
 /**
  * A throttle rule: how many requests a client may make within a fixed window.
+ *
+ * The rule carries only policy numbers; scoping (which client, which
+ * endpoint) is the caller's job when choosing the `id` passed to
+ * {@link SlidingWindowLimiter.check}.
  */
 export interface RateLimitRule {
-  /** Identifies the bucket the rule counts (see `deriveKey` in the HTTP adapter). */
-  key: string;
   /** Window length in milliseconds. */
   windowMs: number;
   /** Maximum requests allowed within `windowMs`. */
   maxRequests: number;
-  /**
-   * Restricts the rule to paths matching this pattern. A trailing `*` matches
-   * any path prefix (`/api/auth/*`); otherwise the path must match exactly.
-   */
-  pathPattern?: string;
 }
 
 /**
@@ -118,7 +115,8 @@ export class SlidingWindowLimiter {
   /**
    * Decide whether a request for `rule` is allowed, incrementing the counter.
    *
-   * @param id - Logical client identity; the middleware derives it from the request.
+   * @param id - Logical client identity; the counter bucket is scoped to it, so
+   *   distinct ids never share a bucket.
    * @param rule - The throttle rule to apply.
    * @returns The decision with the budget mirrored for `X-RateLimit-*` headers.
    * @throws Propagates store failures; callers decide how to fail.
@@ -127,7 +125,7 @@ export class SlidingWindowLimiter {
     const now = this.clock.now();
     const { index, reset } = this.windowInfo(now, rule.windowMs);
 
-    const res: IncrementResult = await this.store.increment(rule.key, rule.windowMs, index);
+    const res: IncrementResult = await this.store.increment(id, rule.windowMs, index);
 
     const elapsed = now - index * rule.windowMs;
     const sectionWeight = elapsed / rule.windowMs; // 0..1, how far into window we are
