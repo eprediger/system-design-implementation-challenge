@@ -5,7 +5,7 @@
 
 ## TL;DR
 
-- **Language/stack:** TypeScript on Node.js, Express, ioredis, Jest
+- **Language/stack:** TypeScript on Node.js, ioredis, Jest
 - **Algorithm:** Sliding window counter (O(1) time/space per key)
 - **Storage:** `Store` interface — Redis-backed (atomic Lua) with in-memory fallback
 - **Resilience:** Circuit breaker (closed → open → half-open), fail-open
@@ -29,7 +29,7 @@
 
 - **Multiple algorithms** (specs list three — we ship one, sliding window counter)
 - **Extractor/plugin system** — three rules, keys derived inline
-- **Schema-validation library** — TS types cover config; Express parses request fields
+- **Schema-validation library** — TS types cover config
 - **(Roadmap)** Prometheus-format `/metrics` endpoint; Grafana dashboard
 
 ---
@@ -37,7 +37,7 @@
 ## 2. Architecture
 
 ```
-Request → Express Middleware → extract key(s) → RateLimiter.check(key, rule) → Response
+Request → Middleware → extract key(s) → RateLimiter.check(key, rule) → Response
                                                           │
                                                     CircuitBreaker
                                                     Redis ⇄ in-memory fallback
@@ -45,15 +45,14 @@ Request → Express Middleware → extract key(s) → RateLimiter.check(key, rul
 
 ### Component map
 
-| Component | File | Responsibility |
-|-----------|------|----------------|
-| Rules | `rules.ts` | Define global / per-IP / per-endpoint limits |
-| Middleware | `middleware.ts` | Extract key, run checks, set headers, return 429 |
-| Algorithm | `sliding-window.ts` | Window math, decision logic |
-| Store (interface) | `store/interface.ts` | Uniform storage contract |
-| Redis store | `store/redis.ts` | Atomic Lua scripts, shared state |
-| Memory store | `store/memory.ts` | In-process fallback (Map + expiry) |
-| Circuit breaker | `circuit-breaker.ts` | Closed/Open/Half-open state machine |
+| Component         | File                          | Responsibility                                              |
+| ----------------- | ----------------------------- | ----------------------------------------------------------- |
+| Rules             | `domain/rules.ts` (planned)   | Define global / per-IP / per-endpoint limits                |
+| Rate limiter core | `domain/sliding-window.ts`    | Algorithm + domain types + `Store` / `Clock` ports          |
+| HTTP adapter      | `adapter/http.ts`             | Extract key, run checks, set headers, return 429            |
+| Memory store      | `adapter/memory-store.ts`     | In-process fallback (Map + expiry), implements `Store` port |
+| Redis store       | `adapter/redis.ts` (planned)  | Atomic Lua scripts, shared state, implements `Store` port   |
+| Circuit breaker   | `adapter/circuit-breaker.ts`  | Closed/Open/Half-open state machine                         |
 
 ---
 
@@ -66,13 +65,13 @@ and chose **sliding window counter**. All state is O(1) per key; requests are
 answered with an immediate allow/deny; and the "exactly N allowed per window"
 acceptance criteria (US-1, US-8) hold.
 
-| Algorithm | Precision | Memory | Allow/deny | Distributed (Redis) | Verdict |
-|-----------|-----------|--------|-----------|---------------------|---------|
-| Fixed Window Counter | Low | O(1) | Immediate | Simple single counter | **Rejected** — boundary burst |
-| Sliding Window Log | High | **O(n)/key** | Immediate | Sorted set, O(n) per key | **Rejected** — violates O(1) memory |
-| Token Bucket | Medium | O(1) | Immediate | Needs atomic refill state | **Rejected** — allows bursts, conflicts with strict window |
-| Leaking Bucket | High | **O(burst)/key** | **Delays/queues** | Complex queue state | **Rejected** — queues instead of denying; breaks low latency |
-| **Sliding Window Counter** | **High** | **O(1)** | **Immediate** | **Atomic two-counter Lua** | **Chosen** |
+| Algorithm                  | Precision | Memory           | Allow/deny        | Distributed (Redis)        | Verdict                                                      |
+| -------------------------- | --------- | ---------------- | ----------------- | -------------------------- | ------------------------------------------------------------ |
+| Fixed Window Counter       | Low       | O(1)             | Immediate         | Simple single counter      | **Rejected** — boundary burst                                |
+| Sliding Window Log         | High      | **O(n)/key**     | Immediate         | Sorted set, O(n) per key   | **Rejected** — violates O(1) memory                          |
+| Token Bucket               | Medium    | O(1)             | Immediate         | Needs atomic refill state  | **Rejected** — allows bursts, conflicts with strict window   |
+| Leaking Bucket             | High      | **O(burst)/key** | **Delays/queues** | Complex queue state        | **Rejected** — queues instead of denying; breaks low latency |
+| **Sliding Window Counter** | **High**  | **O(1)**         | **Immediate**     | **Atomic two-counter Lua** | **Chosen**                                                   |
 
 ### Why each rejected algorithm does not fit our requirements
 
@@ -147,33 +146,40 @@ or a constant. A class hierarchy for key derivation is over-engineering.
 ## 5. Store Interface
 
 ```ts
+interface IncrementResult {
+  current: number;   // count in the window `windowIndex`
+  previous: number;  // count in `windowIndex - 1`, for the weighted blend
+}
+
 interface Store {
-  increment(key: string, windowMs: number): Promise<{ count: number; ttl: number }>;
-  get(key: string): Promise<number>;
+  increment(key: string, windowMs: number, windowIndex: number): Promise<IncrementResult>;
+  get(key: string, windowMs: number, windowIndex: number): Promise<number>;
   reset(key: string): Promise<void>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
 }
 ```
 
-Two implementations: Redis (atomic, shared) and in-memory (fallback). The
-interface is deliberately small — only what the sliding-window algorithm needs.
-The spec lists `set(key, value, ttl)` as a method; we cut it because sliding
-window never needs unconditional sets.
+`windowIndex = floor(now / windowMs)`; `increment` reports both the current
+and previous window counts in a single atomic operation (no race conditions,
+one round trip). Two implementations: Redis (atomic, shared) and in-memory
+(fallback). The interface is deliberately small — only what the sliding-window
+algorithm needs. The spec lists `set(key, value, ttl)` as a method; we cut it
+because sliding window never needs unconditional sets.
 
 ---
 
 ## 6. Circuit Breaker
 
 ```
-CLOSED (healthy) --N failures--> OPEN (fallback) --timeout--> HALF-OPEN (test) --M successes--> CLOSED
+CLOSED (healthy) --N failures--> OPEN (fallback) --timeout--> HALF_OPEN (test) --M successes--> CLOSED
       ^                                                                                 │
       └──────────────────────────── failure reopens → ─────────────────────────────────┘
 ```
 
 - **CLOSED:** checks go to Redis. Consecutive failures increment a counter.
-- **OPEN:** Redis skipped, in-memory fallback used. After a timeout → HALF-OPEN.
-- **HALF-OPEN:** a limited probe goes to Redis. Success → CLOSED; failure → OPEN.
+- **OPEN:** Redis skipped, in-memory fallback used. After a timeout → HALF_OPEN.
+- **HALF_OPEN:** a limited probe goes to Redis. Success → CLOSED; failure → OPEN.
 
 Fail-open: if the store operation errors at any point, the request is served
 (and rate limited in-memory) rather than blocked. Errors are logged at WARN.
@@ -209,15 +215,16 @@ Rationale:
 ## 8. Testing Strategy (BDD/TDD)
 
 Tests are written first (red), implementation second (green), expressed as
-given/when/then via Jest `describe`/`it`.
+given/when/then via Jest `describe`/`it`. Each test file is co-located beside
+its subject (`*.test.ts` next to the module it tests).
 
-| Suite | Coverage |
-|-------|----------|
-| `sliding-window.test.ts` | within limit, at limit, reset, boundary, zero limit, single request |
-| `store.test.ts` | memory (unit); Redis (integration, skips if unavailable) |
-| `circuit-breaker.test.ts` | all state transitions |
-| `middleware.test.ts` | 429, headers, allow, fail-open |
-| `concurrency.test.ts` | 100 concurrent / limit 50 → exactly 50 allowed |
+| Suite                       | Location                              | Coverage                                                            |
+| --------------------------- | ------------------------------------- | ------------------------------------------------------------------- |
+| sliding-window              | `src/domain/sliding-window.test.ts`   | within limit, at limit, reset, boundary, zero limit, single request |
+| memory store / Redis        | `src/adapter/memory-store.test.ts`    | memory (unit); Redis (integration, skips if unavailable)            |
+| circuit-breaker             | `src/adapter/circuit-breaker.test.ts` | all state transitions                                               |
+| HTTP adapter (middleware)   | `src/adapter/http.test.ts`            | 429, headers, allow, fail-open                                      |
+| concurrency                 | `src/domain/concurrency.test.ts`      | 100 concurrent / limit 50 → exactly 50 allowed                      |
 
 Redis integration tests skip gracefully when no local Redis is available.
 
@@ -232,6 +239,14 @@ Redis integration tests skip gracefully when no local Redis is available.
   per-window enforcement rather than burst smoothing. (See §3.)
 
 _Other decisions land here as they are made._
+
+### Known issues (backlog)
+
+- **`check(id, rule)` ignores `id`.** `SlidingWindowLimiter.check` keys the store
+  by `rule.key` (`src/domain/sliding-window.ts`), so the middleware's derived
+  per-IP / per-endpoint keys collapse into one shared bucket per rule — violates
+  US-2 isolation. Existing tests only exercise a single IP and don't catch it.
+  Fix: have `check` increment by `id` (still bucketed under the rule).
 
 ---
 
