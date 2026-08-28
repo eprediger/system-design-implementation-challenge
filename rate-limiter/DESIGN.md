@@ -119,8 +119,13 @@ effectiveCount = prevWindowCount * (1 - sectionWeight) + currWindowCount
 allowed        = effectiveCount <= maxRequests
 ```
 
-- **Redis:** one atomic Lua script reads, increments, and expires both counters in
-  a single round trip (no race conditions, single network hop).
+- **Redis:** one atomic Lua script (`INCR` the current-window counter, `GET` the
+  previous one, `PEXPIRE` in a single `EVAL`) — no race conditions between the
+  read-modify steps and no lost counts under concurrent requests across
+  processes, in one round trip. Keys are `rl:<identity>:<windowIndex>`, TTL is a
+  fixed `2 * windowMs` (current window's remainder + the following window, during
+  which it is read as the weighted "previous"). A regression test pins the TTL to
+  exactly that bounded window (it must never scale with the epoch `windowIndex`).
 - **Memory:** two counters per key plus a cheap lazy expiry sweep.
 
 ---
@@ -237,6 +242,12 @@ Redis integration tests skip gracefully when no local Redis is available.
   the 429 + `Retry-After` response is the authoritative signal. (See §7.)
 - **Algorithm:** sliding window counter over token/leaking bucket — strict
   per-window enforcement rather than burst smoothing. (See §3.)
+- **Redis atomicity:** the shared-counter increment must be one Lua `EVAL`
+  (INCR + GET + PEXPIRE) rather than separate commands — interleaving between
+  processes would let a count land in the window after it was read as
+  "previous," losing it. Cost: a small inline Lua string in the adapter;
+  benefit: correctness under the distributed (US-3) and concurrency (US-8)
+  criteria. Counter keys self-expire after `2 * windowMs`.
 
 _Other decisions land here as they are made._
 
