@@ -1,7 +1,9 @@
 # Rate Limiter
 
-Server-side API rate limiter (sliding window counter). Implementation and specs live here; architecture and decisions are
-recorded in [`DESIGN.md`](DESIGN.md).
+Server-side API rate limiter (sliding window counter). Implementation and specs live in `rate-limiter/`; architecture and
+decisions are recorded in [`rate-limiter/DESIGN.md`](rate-limiter/DESIGN.md).
+
+All commands below assume a shell in `rate-limiter/`.
 
 ## Requirements
 
