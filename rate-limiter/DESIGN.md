@@ -226,9 +226,9 @@ its subject (`*.test.ts` next to the module it tests).
 | Suite                       | Location                              | Coverage                                                            |
 | --------------------------- | ------------------------------------- | ------------------------------------------------------------------- |
 | sliding-window              | `src/domain/sliding-window.test.ts`   | within limit, at limit, reset, boundary, zero limit, single request |
-| memory store / Redis        | `src/adapter/memory-store.test.ts`    | memory (unit); Redis (integration, skips if unavailable)            |
+| memory store                | `src/adapter/memory-store.test.ts`    | unit                                                                 |
+| redis store                 | `src/adapter/redis.test.ts`           | integration, skips if unavailable                                    |
 | circuit-breaker             | `src/adapter/circuit-breaker.test.ts` | all state transitions                                               |
-| HTTP adapter (middleware)   | `src/adapter/http.test.ts`            | 429, headers, allow, fail-open                                      |
 | concurrency                 | `src/domain/concurrency.test.ts`      | 100 concurrent / limit 50 → exactly 50 allowed                      |
 
 Redis integration tests skip gracefully when no local Redis is available.
@@ -250,14 +250,6 @@ Redis integration tests skip gracefully when no local Redis is available.
   criteria. Counter keys self-expire after `2 * windowMs`.
 
 _Other decisions land here as they are made._
-
-### Known issues (backlog)
-
-- **`check(id, rule)` ignores `id`.** `SlidingWindowLimiter.check` keys the store
-  by `rule.key` (`src/domain/sliding-window.ts`), so the middleware's derived
-  per-IP / per-endpoint keys collapse into one shared bucket per rule — violates
-  US-2 isolation. Existing tests only exercise a single IP and don't catch it.
-  Fix: have `check` increment by `id` (still bucketed under the rule).
 
 ---
 
