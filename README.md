@@ -54,6 +54,34 @@ the host has none):
 docker run -it --rm -v "$PWD:/app" -w /app rate-limiter-dev bash
 ```
 
+## Redis (integration tests)
+
+`npm test` runs the Redis-backed store suite when a Redis server is reachable
+at `redis://127.0.0.1:6379` (or `$REDIS_URL`), and skips it silently otherwise.
+
+Start Redis via Docker Compose, from the repo root (parent of `rate-limiter/`):
+
+```sh
+docker compose up -d redis
+docker compose exec redis redis-cli ping   # PONG
+```
+
+When running the suite *from the dev container*, the container's own
+`127.0.0.1` doesn't reach the compose service — run on the host network
+(Linux; matches the dev image and CI):
+
+```sh
+docker run --rm --network host -v "$PWD:/app" -w /app rate-limiter-dev npm test
+```
+
+Inspect live counters while tests (or the stress demo, later) run:
+
+```sh
+docker compose exec redis redis-cli KEYS 'rl:*'
+```
+
+Stop and wipe when done: `docker compose down -v`.
+
 ## Layout
 
 ```

@@ -11,6 +11,11 @@ jobs:
     defaults:
       run:
         working-directory: rate-limiter
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - "6379:6379"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

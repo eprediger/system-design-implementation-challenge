@@ -6,13 +6,20 @@ Server-side API rate limiter (TypeScript). Solution lives in `rate-limiter/`; sp
 
 ## Commands (run from `rate-limiter/`)
 
-There is no local Node here — things run via Docker (`node:24-slim` dev image):
+There is no local Node here — things run via Docker (`node:24-slim` dev image). Redis runs via Docker Compose from the repo root:
+
+```
+docker compose up -d redis    # start Redis (integration tests)
+docker compose exec redis redis-cli ping
+docker compose down -v        # stop and drop the volume
+```
 
 - `docker build -t rate-limiter-dev .` — build the image (deps installed via `npm ci`).
 - `docker run -it --rm rate-limiter-dev bash` — interactive shell; run commands by hand inside: `npm run typecheck`, `npm run build`, `npm test`, `npx jest <file>.test.ts` (single suite).
-- One-shot: `docker run --rm rate-limiter-dev npm test`.
+- One-shot: `docker run --rm rate-limiter-dev npm test`. With Redis up, the integration suite needs the host network so the container's `127.0.0.1:6379` reaches the compose service (plain run silently skips it): `docker run --rm --network host -v "$PWD:/app" -w /app rate-limiter-dev npm test`.
+- `REDIS_URL` (default `redis://127.0.0.1:6379`) points the suite at a different instance; CI provides Redis as a job service, so no flag is needed there.
 
-Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; there is no lint script), `npm run build` (`tsc` → `dist/`), `npm test` (`jest --runInBand`). `npm start` serves the lib entry only — there is no HTTP server yet.
+Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; there is no lint script), `npm run build` (`tsc` → `dist/`), `npm test` (`jest --runInBand`). `npm start` serves the lib entry only — HTTP comes with the reference demo (`demo/`, not yet implemented).
 
 ## Workflow & style
 
