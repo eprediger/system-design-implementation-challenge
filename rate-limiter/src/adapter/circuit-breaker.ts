@@ -7,6 +7,19 @@
  */
 export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
+/**
+ * Thrown by {@link CircuitBreaker.exec} when the circuit short-circuits: the
+ * circuit is OPEN and still cooling down, or a HALF_OPEN recovery probe is
+ * already in flight. Consumers distinguish it from a real dependency failure,
+ * e.g. `FailOpenStore` stays silent for it instead of re-warning per request.
+ */
+export class CircuitOpenError extends Error {
+  constructor() {
+    super('Circuit is open');
+    this.name = 'CircuitOpenError';
+  }
+}
+
 /** Configuration for {@link CircuitBreaker}. */
 export interface CircuitBreakerOptions {
   /** Consecutive failures in `CLOSED` that trip the circuit to `OPEN`. Must be >= 1. */
@@ -32,6 +45,7 @@ export class CircuitBreaker {
   private failures = 0;
   private successes = 0;
   private openedAt = 0;
+  private probing = false;
   private readonly now: () => number;
   private readonly cfg: Required<CircuitBreakerOptions>;
 
@@ -52,6 +66,7 @@ export class CircuitBreaker {
     this.openedAt = this.now();
     this.failures = 0;
     this.successes = 0;
+    this.probing = false;
   }
 
   /**
@@ -59,15 +74,24 @@ export class CircuitBreaker {
    *
    * @param op - The guarded call (e.g. a Redis round trip).
    * @returns `op`'s result.
-   * @throws When the circuit is `OPEN` and still cooling down, without calling `op`; rethrows `op` failures.
+   * @throws {CircuitOpenError} When the circuit short-circuits without calling `op`: it is
+   * `OPEN` and still cooling down, or a `HALF_OPEN` recovery probe is already in flight.
+   * @throws Rethrows `op` failures (CLOSED) — on the way to `OPEN`, or reopening (HALF_OPEN).
    */
   async exec<T>(op: () => Promise<T>): Promise<T> {
     if (this.state === 'OPEN') {
       if (this.now() - this.openedAt >= this.cfg.recoveryTimeoutMs) {
         this.state = 'HALF_OPEN';
       } else {
-        throw new Error('Circuit is open');
+        throw new CircuitOpenError();
       }
+    }
+
+    // One in-flight probe only: with `probing` set, every concurrent call
+    // short-circuits to the fallback instead of piling onto the dependency.
+    if (this.state === 'HALF_OPEN') {
+      if (this.probing) throw new CircuitOpenError();
+      this.probing = true;
     }
 
     try {
@@ -78,14 +102,18 @@ export class CircuitBreaker {
           this.state = 'CLOSED';
           this.successes = 0;
         }
+        this.probing = false;
       } else {
         this.failures = 0;
       }
       return result;
     } catch (err) {
+      // A failure that lands after the circuit already tripped is a straggler
+      // from CLOSED: swallowing it keeps `openedAt` un-re-armed, so a slow
+      // in-flight failure cannot extend the cooldown.
       if (this.state === 'HALF_OPEN') {
         this.transitionToOpen();
-      } else {
+      } else if (this.state === 'CLOSED') {
         this.failures++;
         if (this.failures >= this.cfg.failureThreshold) {
           this.transitionToOpen();

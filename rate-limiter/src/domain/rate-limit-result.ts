@@ -8,7 +8,8 @@ export class RateLimitResult {
   /**
    * @param allowed Whether the hit is allowed.
    * @param limit The ruling rule's budget (`maxRequests`).
-   * @param remaining Hits still available in the current window (floored, never negative).
+   * @param remaining Hits still available in the current window (ceiled against
+   *   the sliding usage so it never overstates availability; never negative).
    * @param reset Epoch time in **seconds** at which the current window resets.
    * @param retryAfter Seconds to wait before retrying; present only when throttled.
    */
@@ -22,14 +23,16 @@ export class RateLimitResult {
 
   /**
    * Whether `this` should beat `other` for the ruling: a denying verdict wins
-   * over an allowed one, and among equally-standing verdicts the one with
-   * fewer hits remaining wins. Equal verdicts do not win, so the first rule
-   * keeps the ruling on an exact tie.
+   * over an allowed one; among equally-standing verdicts the one with fewer
+   * hits remaining wins; and since two denials always show `remaining` 0, a
+   * denial with the smaller limit wins — it is the tightest budget. Equal
+   * verdicts do not win, so the first rule keeps the ruling on an exact tie.
    */
   isMoreRestrictiveThan(other: RateLimitResult): boolean {
     return (
       (!this.allowed && other.allowed) ||
-      (this.allowed === other.allowed && this.remaining < other.remaining)
+      (this.allowed === other.allowed && this.remaining < other.remaining) ||
+      (!this.allowed && !other.allowed && this.limit < other.limit)
     );
   }
 }

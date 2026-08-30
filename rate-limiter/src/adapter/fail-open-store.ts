@@ -1,4 +1,5 @@
 import type { IncrementResult, Store } from '../domain/ports';
+import { CircuitOpenError } from './circuit-breaker';
 import type { CircuitBreaker } from './circuit-breaker';
 
 /** Options for {@link FailOpenStore}. */
@@ -9,7 +10,7 @@ export interface FailOpenStoreOptions {
   breaker: CircuitBreaker;
   /** In-process store that serves while the primary is unavailable. */
   fallback: Store;
-  /** Sink for the WARN line emitted on every fallback; defaults to `console.warn`. */
+  /** Sink for the WARN line emitted on a real primary failure; defaults to `console.warn`. */
   warn?: (message: string) => void;
 }
 
@@ -17,8 +18,11 @@ export interface FailOpenStoreOptions {
  * A {@link Store} that serves (fail-open) instead of blocking when the primary
  * store is unavailable: every operation runs through the circuit breaker, and
  * any failure — a tripped circuit or a throwing primary — falls back to the
- * in-memory store and is logged at WARN. When the primary recovers, the
- * breaker's half-open probe closes the circuit and Redis is re-used.
+ * in-memory store. A real primary failure is logged at WARN; callers
+ * short-circuited while the breaker is OPEN (a `CircuitOpenError`) fall back
+ * silently, one line was enough when the trip happened. When the primary
+ * recovers, the breaker's half-open probe closes the circuit and Redis is
+ * re-used.
  */
 export class FailOpenStore implements Store {
   private readonly primary: Store;
@@ -39,8 +43,10 @@ export class FailOpenStore implements Store {
   ): Promise<T> {
     try {
       return await this.breaker.exec(() => run(this.primary));
-    } catch {
-      this.warn('rate-limiter fail-open: primary store unavailable, serving from memory');
+    } catch (err) {
+      if (!(err instanceof CircuitOpenError)) {
+        this.warn('rate-limiter fail-open: primary store unavailable, serving from memory');
+      }
       return fallbackRun(this.fallback);
     }
   }

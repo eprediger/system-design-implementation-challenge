@@ -17,12 +17,14 @@ export interface RateLimitRule {
 
 /**
  * Signals a limiter configuration that violates an invariant: a limiter must
- * be built with at least one rule. Root cause at construction time, so a
- * silent no-op limiter can never be mistaken for a working one.
+ * be built with at least one rule, and every rule must have a positive finite
+ * `windowMs` and an integer, non-negative `maxRequests`. Root cause at
+ * construction time, so a silent no-op or nonsense limiter can never be
+ * mistaken for a working one.
  */
 export class RateLimiterConfigurationError extends Error {
-  constructor() {
-    super('SlidingWindowLimiter requires at least one rule');
+  constructor(message?: string) {
+    super(message ?? 'SlidingWindowLimiter requires at least one rule');
     this.name = 'RateLimiterConfigurationError';
   }
 }
@@ -80,6 +82,14 @@ export class SlidingWindowLimiter<T> {
     if (options.rules.length === 0) {
       throw new RateLimiterConfigurationError();
     }
+    for (const { rule } of options.rules) {
+      if (!Number.isFinite(rule.windowMs) || rule.windowMs <= 0) {
+        throw new RateLimiterConfigurationError('rule.windowMs must be a finite positive number');
+      }
+      if (!Number.isInteger(rule.maxRequests) || rule.maxRequests < 0) {
+        throw new RateLimiterConfigurationError('rule.maxRequests must be a non-negative integer');
+      }
+    }
     this.store = options.store;
     this.rules = options.rules;
     this.clock = options.clock ?? { now: Date.now };
@@ -129,7 +139,9 @@ export class SlidingWindowLimiter<T> {
     const sectionWeight = elapsed / rule.windowMs; // 0..1, how far into window we are
     const effectiveCount = res.previous * (1 - sectionWeight) + res.current;
 
-    const remaining = Math.max(0, rule.maxRequests - Math.floor(effectiveCount));
+    // Ceil the effective usage so a fraction of decayed usage is never reported
+    // as a full free hit — `remaining` must never overstate availability.
+    const remaining = Math.max(0, rule.maxRequests - Math.ceil(effectiveCount));
     const allowed = effectiveCount <= rule.maxRequests;
     const retryAfter = allowed ? undefined : Math.max(1, Math.ceil((reset * 1000 - now) / 1000));
 

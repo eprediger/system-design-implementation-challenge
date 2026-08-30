@@ -102,16 +102,30 @@ describe('Given a sliding window rate limit rule', () => {
     });
   });
 
-  describe('Given hits spanning a window boundary', () => {
-    it('weights previous window usage by how much time has elapsed', async () => {
+  describe('Given hits at a window boundary', () => {
+    it('weighs the previous window in full at the boundary (decay, not a hard reset)', async () => {
       const limiter = single(() => 'key');
       await limiter.check({}); // window 0
-      now = windowMs + 1; // move into window 1 almost entirely
-      limiter.check({});
-      now = windowMs + 1;
+      await limiter.check({}); // window 0
+      now = windowMs; // exactly at the boundary: window 0 still counts at weight 1
       const result = await limiter.check({});
-      // only 1 hit in the far-right of window 1, previous window is fully expired
+      // 2 * 1.0 + 1 = 3 == maxRequests: a sliding-window counter does not make
+      // the whole limit available again the instant a window turns over; it
+      // frees up only as the previous window decays.
       expect(result.allowed).toBe(true);
+      expect(result.remaining).toBe(0);
+    });
+
+    it('frees capacity only gradually as the previous window decays', async () => {
+      const limiter = single(() => 'key');
+      await limiter.check({}); // window 0
+      await limiter.check({});
+      await limiter.check({});
+      now = windowMs + 0.5 * windowMs; // half of window 1 elapsed
+      const result = await limiter.check({});
+      // 3 * 0.5 + 1 = 2.5 <= 3: still allowed, but usage remains high
+      expect(result.allowed).toBe(true);
+      expect(result.remaining).toBe(0);
     });
   });
 
@@ -155,16 +169,28 @@ describe('Given a sliding window rate limit rule', () => {
       expect(third.retryAfter).toBeDefined();
     });
 
-    it('when all deny, then the first rule wins the tie deterministically', async () => {
+    it('when all deny, then the tightest budget is reported', async () => {
       const limiter = limiterFor<unknown>([
         { bucketOf: () => 'a', rule: { windowMs, maxRequests: 2 } },
-        { bucketOf: () => 'b', rule: { windowMs, maxRequests: 1 } },
+        { bucketOf: () => 'b', rule: { windowMs, maxRequests: 5 } },
       ]);
       await limiter.check({});
       await limiter.check({});
       const third = await limiter.check({});
       expect(third.allowed).toBe(false);
-      expect(third.limit).toBe(2); // first rule is reported on the exact tie
+      expect(third.limit).toBe(2); // smallest denied budget wins, not the first rule
+      expect(third.remaining).toBe(0);
+    });
+
+    it('keeps the first rule on two identical denials', async () => {
+      const limiter = limiterFor<unknown>([
+        { bucketOf: () => 'a', rule: { windowMs, maxRequests: 2 } },
+        { bucketOf: () => 'b', rule: { windowMs, maxRequests: 2 } },
+      ]);
+      await limiter.check({});
+      await limiter.check({});
+      const third = await limiter.check({});
+      expect(third.allowed).toBe(false);
       expect(third.remaining).toBe(0);
     });
   });
@@ -174,6 +200,18 @@ describe('Given a sliding window rate limit rule', () => {
       expect(() => new SlidingWindowLimiter({ store, rules: [] })).toThrow(
         RateLimiterConfigurationError,
       );
+    });
+
+    it.each([
+      [{ windowMs: 0, maxRequests: 1 }, 'zero windowMs'],
+      [{ windowMs: -1, maxRequests: 1 }, 'negative windowMs'],
+      [{ windowMs: Number.POSITIVE_INFINITY, maxRequests: 1 }, 'non-finite windowMs'],
+      [{ windowMs, maxRequests: -1 }, 'negative maxRequests'],
+      [{ windowMs, maxRequests: 1.5 }, 'fractional maxRequests'],
+    ])('rejects %s (%s)', (badRule) => {
+      expect(
+        () => new SlidingWindowLimiter({ store, rules: [{ bucketOf: () => 'key', rule: badRule }] }),
+      ).toThrow(RateLimiterConfigurationError);
     });
   });
 

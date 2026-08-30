@@ -40,7 +40,7 @@ export interface Store {
   /** Clear every bucket under `key` (all window indices). */
   reset(key: string): Promise<void>;
 
-  /** Health probe (used by the circuit breaker); `true` when the store responds. */
+  /** Health probe for operators/monitoring; `true` when the store responds. */
   ping(): Promise<boolean>;
 
   /** Release underlying resources (e.g. connections). */

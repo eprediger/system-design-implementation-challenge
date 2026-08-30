@@ -1,4 +1,5 @@
 import type { IncrementResult, Store } from '../domain/ports';
+import { encodeBucketId } from './bucket-id';
 
 interface Bucket {
   count: number;
@@ -30,7 +31,7 @@ export class MemoryStore implements Store {
   }
 
   private bucketKey(base: string, windowIndex: number): string {
-    return `${base}:${windowIndex}`;
+    return `${encodeBucketId(base)}:${windowIndex}`;
   }
 
   private prune(now: number): void {
@@ -80,9 +81,12 @@ export class MemoryStore implements Store {
 
   /** See {@link Store.reset}. Clears every window bucket under `key`. */
   async reset(key: string): Promise<void> {
+    // Exact prefix: bucket keys start with the encoded id, and the encoding
+    // holds no delimiter or glob characters, so `:a:b` can never match `:a`.
     // ponytail: iterating all keys on reset is O(n); fine because reset is rare.
+    const prefix = `${encodeBucketId(key)}:`;
     for (const k of this.buckets.keys()) {
-      if (k.startsWith(`${key}:`)) this.buckets.delete(k);
+      if (k.startsWith(prefix)) this.buckets.delete(k);
     }
   }
 

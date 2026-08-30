@@ -85,4 +85,89 @@ describe('Given a circuit breaker', () => {
       expect(() => new CircuitBreaker({ failureThreshold: 0, recoveryTimeoutMs: 1, successThreshold: 1 })).toThrow();
     });
   });
+
+  describe('When recoveryTimeoutMs is 0', () => {
+    it('opens, then probes recovery on the very next call', async () => {
+      const clock = { now: 0 };
+      const breaker = new CircuitBreaker({
+        failureThreshold: 1,
+        recoveryTimeoutMs: 0,
+        successThreshold: 1,
+        now: () => clock.now,
+      });
+
+      await breaker.exec(fail()).catch(() => {});
+      expect(breaker.state).toBe('OPEN');
+
+      await expect(breaker.exec(ok('up'))).resolves.toBe('up');
+      expect(breaker.state).toBe('CLOSED');
+    });
+  });
+
+  describe('When the circuit reopens or probes', () => {
+    it('admits only one in-flight HALF_OPEN probe; concurrent calls short-circuit', async () => {
+      const clock = { now: 0 };
+      const breaker = new CircuitBreaker({
+        failureThreshold: 1,
+        recoveryTimeoutMs: 100,
+        successThreshold: 1,
+        now: () => clock.now,
+      });
+      await breaker.exec(fail()).catch(() => {});
+      expect(breaker.state).toBe('OPEN');
+
+      clock.now = 200; // cooldown elapsed
+
+      let calls = 0;
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const op = async () => {
+        calls++;
+        await gate;
+        return 'ok';
+      };
+
+      const probing = breaker.exec(op); // probes recovery
+      await expect(breaker.exec(op)).rejects.toThrow('Circuit is open'); // second call short-circuits
+      expect(calls).toBe(1);
+      expect(breaker.state).toBe('HALF_OPEN');
+
+      release();
+      await expect(probing).resolves.toBe('ok');
+      expect(breaker.state).toBe('CLOSED');
+    });
+
+    it('does not re-arm the cooldown when a straggler failure lands after the trip', async () => {
+      const clock = { now: 0 };
+      const breaker = new CircuitBreaker({
+        failureThreshold: 1,
+        recoveryTimeoutMs: 1000,
+        successThreshold: 1,
+        now: () => clock.now,
+      });
+
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const gatedFail = async () => {
+        await gate;
+        throw new Error('boom');
+      };
+
+      const straggler = breaker.exec(gatedFail); // in flight while CLOSED
+      await breaker.exec(fail()).catch(() => {}); // trips -> OPEN, openedAt = 0
+
+      clock.now = 900; // near the end of the original cooldown
+      release(); // straggler fails now; it must not re-arm openedAt
+      await straggler.catch(() => {});
+      expect(breaker.state).toBe('OPEN');
+
+      clock.now = 1000; // original cooldown elapses
+      await expect(breaker.exec(ok('up'))).resolves.toBe('up');
+      expect(breaker.state).toBe('CLOSED');
+    });
+  });
 });
