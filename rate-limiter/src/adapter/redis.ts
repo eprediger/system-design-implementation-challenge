@@ -41,36 +41,44 @@ export class RedisStore implements Store {
     this.redis.on('error', () => {});
   }
 
+  // The bounded retryStrategy ends the client while Redis stays down; reconnect
+  // on demand so the fail-open wrapper can serve from Redis again once it
+  // recovers instead of rejecting forever.
+  private async run<T>(op: (client: Redis) => Promise<T>): Promise<T> {
+    if (this.redis.status === 'end') {
+      await this.redis.connect();
+    }
+    return op(this.redis);
+  }
+
   async increment(key: string, windowMs: number, windowIndex: number): Promise<IncrementResult> {
     const ttlMs = 2 * windowMs;
-    const result = (await this.redis.eval(
-      INCREMENT_SCRIPT,
-      2,
-      counterKey(key, windowIndex),
-      counterKey(key, windowIndex - 1),
-      ttlMs,
+    const result = (await this.run((client) =>
+      client.eval(INCREMENT_SCRIPT, 2, counterKey(key, windowIndex), counterKey(key, windowIndex - 1), ttlMs),
     )) as [number, number];
     return { current: result[0], previous: result[1] };
   }
 
   async get(key: string, windowMs: number, windowIndex: number): Promise<number> {
-    const raw = await this.redis.get(counterKey(key, windowIndex));
+    const raw = await this.run((client) => client.get(counterKey(key, windowIndex)));
     return raw === null ? 0 : Number(raw);
   }
 
   async reset(key: string): Promise<void> {
-    const stream = this.redis.scanStream({ match: `${KEY_PREFIX}:${key}:*`, count: 100 });
-    const pipeline = this.redis.pipeline();
-    for await (const batch of stream) {
-      if (batch.length > 0) {
-        pipeline.del(...batch);
+    await this.run(async (client) => {
+      const stream = client.scanStream({ match: `${KEY_PREFIX}:${key}:*`, count: 100 });
+      const pipeline = client.pipeline();
+      for await (const batch of stream) {
+        if (batch.length > 0) {
+          pipeline.del(...batch);
+        }
       }
-    }
-    await pipeline.exec();
+      await pipeline.exec();
+    });
   }
 
   async ping(): Promise<boolean> {
-    const pong = await this.redis.ping();
+    const pong = await this.run((client) => client.ping());
     return pong === 'PONG';
   }
 

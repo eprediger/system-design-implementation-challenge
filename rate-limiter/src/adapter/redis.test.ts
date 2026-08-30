@@ -1,4 +1,5 @@
 import Redis from 'ioredis';
+import net from 'node:net';
 import { RedisStore } from './redis';
 import { FailOpenStore } from './fail-open-store';
 import { CircuitBreaker } from './circuit-breaker';
@@ -97,5 +98,78 @@ describeRedis('Given a Redis-backed store', () => {
     await expect(failOpen.increment('sw-down', windowMs, liveIndex)).resolves.toEqual({ current: 3, previous: 0 });
     expect(warns).toHaveLength(3);
     await failOpen.close();
+  });
+
+  // ponytail: mini TCP relay in front of the real Redis so a store can
+  // genuinely lose and regain its connection, without stopping the shared daemon.
+  function createRelay() {
+    let server: net.Server | null = null;
+    let port = 0;
+    let closing: Promise<void> = Promise.resolve();
+    const sockets = new Set<net.Socket>();
+    return {
+      address: () => `redis://127.0.0.1:${port}`,
+      async listen(): Promise<void> {
+        await closing;
+        closing = Promise.resolve();
+        const srv = net.createServer((down) => {
+          sockets.add(down);
+          const up = net.connect({ host: new URL(url).hostname, port: Number(new URL(url).port || 6379) });
+          down.on('data', (chunk) => up.write(chunk));
+          up.on('data', (chunk) => down.write(chunk));
+          down.on('error', () => up.destroy());
+          up.on('error', () => down.destroy());
+          const teardown = () => {
+            sockets.delete(down);
+            up.destroy();
+            down.destroy();
+          };
+          down.on('close', teardown);
+          up.on('close', teardown);
+        });
+        server = srv;
+        await new Promise<void>((resolve, reject) => {
+          srv.once('error', reject);
+          srv.listen(port, '127.0.0.1', () => {
+            if (!port) port = (srv.address() as net.AddressInfo).port;
+            resolve();
+          });
+        });
+      },
+      kill(): void {
+        for (const socket of [...sockets]) socket.destroy();
+        if (server) {
+          const srv = server;
+          server = null;
+          closing = new Promise<void>((resolve) => srv.close(() => resolve()));
+        }
+      },
+      async close(): Promise<void> {
+        for (const socket of [...sockets]) socket.destroy();
+        if (server) {
+          const srv = server;
+          server = null;
+          await new Promise<void>((resolve) => srv.close(() => resolve()));
+        }
+        await closing;
+      },
+    };
+  }
+
+  it('re-uses its connection once a lost Redis returns (reconnect on demand)', async () => {
+    const relay = createRelay();
+    await relay.listen();
+    const store = new RedisStore(relay.address());
+
+    await expect(store.increment('sw-recover', windowMs, 0)).resolves.toEqual({ current: 1, previous: 0 });
+
+    relay.kill();
+    await expect(store.increment('sw-recover', windowMs, 0)).rejects.toThrow();
+
+    await relay.listen();
+    await expect(store.increment('sw-recover', windowMs, 0)).resolves.toEqual({ current: 2, previous: 0 });
+
+    await store.close();
+    await relay.close();
   });
 });
