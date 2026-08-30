@@ -37,6 +37,9 @@ Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; the
 - `src/domain/ports.ts` — driven ports (`Store`, `Clock`, `IncrementResult`). Domain owns its ports; adapters import them.
 - `src/adapter/` — `memory-store.ts` (in-memory `Store` impl), `circuit-breaker.ts`, `fail-open-store.ts` (`Store` that serves from memory with a WARN when the primary is down or the circuit is open).
 - `src/index.ts` — composition root re-exporting the public API.
+- `REVIEW.md` — committed review checklist (adversarial mandates + human-review
+  sign-off). After feature increments, run a fresh-context red-team against it
+  and fix confirmed findings in a dedicated pass; do-not-edit while reviewing.
 - `demo/` (outside the lib) — reference HTTP consumer: consumes the packed `rate-limiter` tarball by package name; `createApp(rules, storeFactory?)` builds the limiter, middleware calls `check(req)` and renders headers/429; `stress.test.ts` (two instances sharing one Redis → global ceiling) and `failover.test.ts` (in-test TCP relay in front of Redis → outage keeps serving, recovery re-seats) are Redis-gated suites.
 
 ## Locked-in decisions (do not reinvent)

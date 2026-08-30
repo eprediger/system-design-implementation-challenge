@@ -102,9 +102,8 @@ Two Redis-gated suites run when a Redis is reachable (skipped otherwise):
 `stress.test.ts` launches two server instances sharing one Redis and asserts the
 per-client ceiling holds **globally** (exactly 100 of 200 requests allowed
 across both); `failover.test.ts` fronts Redis with an in-test TCP relay, cuts
-it mid-load (requests keep flowing from the in-memory fallback, WARN lines),
-then restores it and asserts the circuit re-seats on Redis. Run them via the
-full gate:
+it mid-load (requests keep flowing from the in-memory fallback), then restores
+it and asserts the circuit re-seats on Redis. Run them via the full gate:
 
 ```sh
 docker run --rm --network host -v "$PWD:/app" -w /app/demo rate-limiter-dev npm test   # with compose redis up
@@ -112,7 +111,10 @@ docker run --rm --network host -v "$PWD:/app" -w /app/demo rate-limiter-dev npm 
 
 While the circuit is open the fallback is per-instance memory, so during an
 outage a client splitting traffic across instances can exceed the configured
-limit — enforcement degrades to per-instance until Redis returns.
+limit — enforcement degrades to per-instance until Redis returns. Counts held
+in the fallback during the outage are discarded when Redis re-seats; the shared
+counters resume from Redis's own state (fail-open favors availability over
+state continuity).
 
 The demo also demonstrates fault tolerance (US-5). Without `REDIS_URL` it uses
 an in-memory store directly. Set it to run the full stack — Redis first:
@@ -124,11 +126,17 @@ REDIS_URL=redis://127.0.0.1:6379 npm start
 
 The limiter then backs on `FailOpenStore`: `RedisStore` behind a circuit
 breaker with an in-memory fallback. Kill Redis (`docker compose stop redis`)
-and requests keep flowing, rate limited from memory, with WARN lines; restart
-it and the next half-open probe re-seats Redis after a few healthy checks.
+and requests keep flowing, rate limited from memory. A real primary failure
+logs one WARN as the circuit trips; while it stays open, fallback is silent (no
+per-request log spam). Restart Redis and the next half-open probe re-seats it —
+one in-flight probe at a time, concurrent calls wait on the fallback.
 
-The running server trusts `X-Forwarded-For` (Express `trust proxy`), so per-IP
-rules work through a reverse proxy. Try it:
+By default the server only trusts `X-Forwarded-For` from a loopback client
+(Express `trust proxy: 'loopback'`), so a remote caller cannot spoof its way
+out of per-IP limits. Deploy behind a real forward proxy and opt into trusting
+all hops with `TRUST_PROXY=true`. Per-IP **and** per-`IP:METHOD /path` rules are
+configured; endpoint buckets canonicalize the path (percent-decoding, duplicate
+slashes collapsed) so spelling variants share one counter. Try it:
 
 ```sh
 curl -i -H 'X-Forwarded-For: 1.2.3.4' http://localhost:3000/api/route
