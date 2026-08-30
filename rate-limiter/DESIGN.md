@@ -225,8 +225,10 @@ through the breaker; on any failure — a tripped circuit or a throwing primary 
 it logs at WARN and serves from the fallback, so requests are rate limited
 (from memory) rather than blocked. Recovery is automatic: the half-open probe
 decides whether to close the circuit and re-use Redis. `RedisStore` fails fast
-(no offline queue, bounded reconnect) so a down Redis surfaces to the wrapper
-quickly instead of hanging requests behind ioredis's retry queue.
+(bounded reconnect ending the client after a few attempts) so a down Redis
+surfaces to the wrapper quickly instead of hanging commands behind an endless
+retry queue — and reconnects on demand for the next operation once Redis is
+back, so the half-open probe can genuinely re-seat it.
 
 US-5's "logged, and metrics are updated" acceptance criterion is only half met:
 WARN logging is in place; metrics stay deferred to the `/metrics` roadmap item.
@@ -278,11 +280,17 @@ its subject (`*.test.ts` next to the module it tests).
 | --------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | sliding-window  | `src/domain/sliding-window.test.ts`   | within limit, at limit, reset, boundary, zero limit, single rule, multi-rule aggregation (most restrictive, denial-wins-tie, first-on-tie), empty-rules construction throw |
 | memory store    | `src/adapter/memory-store.test.ts`    | unit                                                                                                                                                                       |
-| redis store     | `src/adapter/redis.test.ts`           | integration, skips if unavailable                                                                                                                                          |
+| redis store     | `src/adapter/redis.test.ts`           | integration, skips if unavailable; includes reconnect-on-demand after a lost connection (via an in-test TCP relay)                                                          |
 | circuit-breaker | `src/adapter/circuit-breaker.test.ts` | all state transitions                                                                                                                                                      |
 | concurrency     | `src/domain/concurrency.test.ts`      | 100 concurrent / limit 50 → exactly 50 allowed                                                                                                                             |
+| fail-open store | `src/adapter/fail-open-store.test.ts` | fallback + WARN on primary failure, OPEN skips the primary, half-open recovery re-uses it                                                                                  |
+| distributed stress | `demo/src/stress.test.ts`          | skips without Redis: two server instances sharing one Redis → 200 concurrent requests, exactly 100 allowed globally                                                         |
+| failover        | `demo/src/failover.test.ts`           | skips without Redis: TCP relay in front of Redis, mid-load outage → still served from fallback, recovery → circuit re-seats on Redis                                      |
 
-Redis integration tests skip gracefully when no local Redis is available.
+Redis integration tests skip gracefully when no local Redis is available. The
+demo stress/failover suites skip too. Heavy load benchmarking (per US-8, "load
+tests run separately") is deferred — the deterministic concurrency,
+distributed-sharing, and failover acceptance criteria are covered in CI instead.
 
 ---
 

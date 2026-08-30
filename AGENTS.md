@@ -17,6 +17,7 @@ docker compose down -v        # stop and drop the volume
 - `docker build -t rate-limiter-dev .` — build the image (deps installed via `npm ci`).
 - `docker run -it --rm rate-limiter-dev bash` — interactive shell; run commands by hand inside: `npm run typecheck`, `npm run build`, `npm test`, `npx jest <file>.test.ts` (single suite).
 - One-shot: `docker run --rm rate-limiter-dev npm test`. With Redis up, the integration suite needs the host network so the container's `127.0.0.1:6379` reaches the compose service (plain run silently skips it): `docker run --rm --network host -v "$PWD:/app" -w /app rate-limiter-dev npm test`.
+- The demo's `npm test` (from `demo/`) similarly runs its Redis-gated suites (`stress`, `failover`) when Redis is reachable and skips them otherwise — use `--network host` to run them locally.
 - `REDIS_URL` (default `redis://127.0.0.1:6379`) points the suite at a different instance; CI provides Redis as a job service, so no flag is needed there.
 
 Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; there is no lint script), `npm run build` (`tsc` → `dist/`), `npm test` (`jest --runInBand`). `npm start` serves the lib entry only — HTTP comes with the reference demo (`demo/`).
@@ -36,7 +37,7 @@ Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; the
 - `src/domain/ports.ts` — driven ports (`Store`, `Clock`, `IncrementResult`). Domain owns its ports; adapters import them.
 - `src/adapter/` — `memory-store.ts` (in-memory `Store` impl), `circuit-breaker.ts`, `fail-open-store.ts` (`Store` that serves from memory with a WARN when the primary is down or the circuit is open).
 - `src/index.ts` — composition root re-exporting the public API.
-- `demo/` (outside the lib) — reference HTTP consumer: consumes the packed `rate-limiter` tarball by package name; `createApp(rules: BucketRule[])` builds the limiter, middleware calls `check(req)` and renders headers/429.
+- `demo/` (outside the lib) — reference HTTP consumer: consumes the packed `rate-limiter` tarball by package name; `createApp(rules, storeFactory?)` builds the limiter, middleware calls `check(req)` and renders headers/429; `stress.test.ts` (two instances sharing one Redis → global ceiling) and `failover.test.ts` (in-test TCP relay in front of Redis → outage keeps serving, recovery re-seats) are Redis-gated suites.
 
 ## Locked-in decisions (do not reinvent)
 

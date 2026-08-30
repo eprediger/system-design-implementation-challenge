@@ -19,8 +19,8 @@ function makeStore(): Store {
   });
 }
 
-export function createApp(rules: Array<BucketRule<Request>>) {
-  const limiter = new SlidingWindowLimiter({ store: makeStore(), rules });
+export function createApp(rules: Array<BucketRule<Request>>, storeFactory: () => Store = makeStore) {
+  const limiter = new SlidingWindowLimiter({ store: storeFactory(), rules });
   const app = express();
   app.set('trust proxy', true);
 

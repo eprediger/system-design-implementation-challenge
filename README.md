@@ -74,7 +74,7 @@ When running the suite *from the dev container*, the container's own
 docker run --rm --network host -v "$PWD:/app" -w /app rate-limiter-dev npm test
 ```
 
-Inspect live counters while tests (or the stress demo, later) run:
+Inspect live counters while tests (or the stress demo) run:
 
 ```sh
 docker compose exec redis redis-cli KEYS 'rl:*'
@@ -94,9 +94,25 @@ From `demo/`:
 
 ```sh
 npm run demo:install   # npm pack the lib → rate-limiter-1.0.0.tgz → npm ci here
-npm test               # supertest suite (per-IP, per-IP+endpoint, 429 + Retry-After)
+npm test               # supertest suites (server, distributed stress, failover)
 npm start              # listens on $PORT (default 3000)
 ```
+
+Two Redis-gated suites run when a Redis is reachable (skipped otherwise):
+`stress.test.ts` launches two server instances sharing one Redis and asserts the
+per-client ceiling holds **globally** (exactly 100 of 200 requests allowed
+across both); `failover.test.ts` fronts Redis with an in-test TCP relay, cuts
+it mid-load (requests keep flowing from the in-memory fallback, WARN lines),
+then restores it and asserts the circuit re-seats on Redis. Run them via the
+full gate:
+
+```sh
+docker run --rm --network host -v "$PWD:/app" -w /app/demo rate-limiter-dev npm test   # with compose redis up
+```
+
+While the circuit is open the fallback is per-instance memory, so during an
+outage a client splitting traffic across instances can exceed the configured
+limit — enforcement degrades to per-instance until Redis returns.
 
 The demo also demonstrates fault tolerance (US-5). Without `REDIS_URL` it uses
 an in-memory store directly. Set it to run the full stack — Redis first:
@@ -127,6 +143,10 @@ src/
   domain/ports.ts            # Store / Clock / IncrementResult ports
   domain/*.test.ts           # co-located tests
   adapter/                   # ports' implementations (memory store, circuit breaker, fail-open store)
+  index.ts                   # composition root (public API)
+demo/src/
+  server.ts                  # HTTP consumer (createApp with per-IP / per-endpoint rules)
+  stress.test.ts / failover.test.ts   # Redis-gated stress + failover suites
 ```
 
 Tests are co-located next to their subjects. Concurrency/edge suites and the
