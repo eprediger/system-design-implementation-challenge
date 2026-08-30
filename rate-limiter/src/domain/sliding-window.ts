@@ -1,86 +1,61 @@
-/**
- * Source of time for window math. Injected so tests can drive the wall clock deterministically.
- */
-export interface Clock {
-  now(): number;
-}
+import { RateLimitResult } from './rate-limit-result';
+import type { Clock, IncrementResult, Store } from './ports';
 
 /**
- * A throttle rule: how many requests a client may make within a fixed window.
+ * A throttle rule: how many hits a client may make within a fixed window.
  *
- * The rule carries only policy numbers; scoping (which client, which
- * endpoint) is the caller's job when choosing the `id` passed to
- * {@link SlidingWindowLimiter.check}.
+ * The rule carries only policy numbers. Which bucket a hit belongs to is the
+ * consumer's job, expressed as the {@link BucketRule.bucketOf} function that
+ * rides alongside each rule — never as a string that can misspell a bucket.
  */
 export interface RateLimitRule {
   /** Window length in milliseconds. */
   windowMs: number;
-  /** Maximum requests allowed within `windowMs`. */
+  /** Maximum hits allowed within `windowMs`. */
   maxRequests: number;
 }
 
 /**
- * Outcome of a rate limit check, mirrored into the HTTP response.
+ * Signals a limiter configuration that violates an invariant: a limiter must
+ * be built with at least one rule. Root cause at construction time, so a
+ * silent no-op limiter can never be mistaken for a working one.
  */
-export interface RateLimitResult {
-  /** Whether the request is allowed. */
-  allowed: boolean;
-  /** The rule's budget (`maxRequests`). */
-  limit: number;
-  /** Requests still available in the current window (floored, never negative). */
-  remaining: number;
-  /** Epoch time in **seconds** at which the current window resets. */
-  reset: number;
-  /** Seconds to wait before retrying; present only when throttled. */
-  retryAfter?: number;
+export class RateLimiterConfigurationError extends Error {
+  constructor() {
+    super('SlidingWindowLimiter requires at least one rule');
+    this.name = 'RateLimiterConfigurationError';
+  }
 }
 
 /**
- * Sliding-window-counter state for one window: the current window's count and
- * the previous window's count. The limiter blends them by how far into the
- * current window it is.
+ * A rule bound to the bucket it governs.
+ *
+ * The library declares the signature; the consumer implements
+ * {@link BucketRule.bucketOf} on every rule, so a rule and its bucket
+ * derivation can never fall out of sync.
+ *
+ * `T` is the unit of work being checked (an HTTP request, a queued job, any
+ * event); `bucketOf` maps it to its counter bucket.
  */
-export interface IncrementResult {
-  /** Count in the window `windowIndex`. */
-  current: number;
-  /** Count in `windowIndex - 1`, decayed by the limiter as the window elapses. */
-  previous: number;
+export interface BucketRule<T> {
+  /** Maps the checked item to the counter bucket it belongs to. */
+  bucketOf(item: T): string;
+  rule: RateLimitRule;
 }
 
-/**
- * Driven port for counter storage. The domain defines the contract; adapters
- * (in-memory, Redis) implement it.
- */
-export interface Store {
-  /**
-   * Increment the bucket for `windowIndex = floor(now / windowMs)`.
-   *
-   * Must be atomic per key so concurrent requests never lose a count.
-   *
-   * @param key - Logical bucket identity (client, endpoint, ...).
-   * @param windowMs - Window length in milliseconds.
-   * @param windowIndex - Which fixed window is being incremented.
-   * @returns The current window's count and the previous window's count.
-   */
-  increment(key: string, windowMs: number, windowIndex: number): Promise<IncrementResult>;
-
-  /** @returns The count for `windowIndex`, or 0 when absent or expired. */
-  get(key: string, windowMs: number, windowIndex: number): Promise<number>;
-
-  /** Clear every bucket under `key` (all window indices). */
-  reset(key: string): Promise<void>;
-
-  /** Health probe (used by the circuit breaker); `true` when the store responds. */
-  ping(): Promise<boolean>;
-
-  /** Release underlying resources (e.g. connections). */
-  close(): Promise<void>;
+export interface SlidingWindowLimiterOptions<T> {
+  /** Backing counter store (in-memory or shared/Redis). */
+  store: Store;
+  /** Rules enforced on every checked item; must be non-empty. */
+  rules: Array<BucketRule<T>>;
+  /** Time source; defaults to `Date.now`. */
+  clock?: Clock;
 }
 
 /**
  * Sliding window counter rate limiter.
  *
- * Time is divided into fixed windows of `windowMs`. For a request arriving at
+ * Time is divided into fixed windows of `windowMs`. For a hit arriving at
  * time T in window index `cur`, the effective usage is the previous window's
  * count weighted by how much of the window has not yet elapsed, plus the
  * current window's count:
@@ -93,15 +68,22 @@ export interface Store {
  * O(1) time and O(1) memory per key (two counters), unlike a sliding window
  * *log* which is O(n).
  */
-export class SlidingWindowLimiter {
+export class SlidingWindowLimiter<T> {
+  private readonly store: Store;
+  private readonly rules: Array<BucketRule<T>>;
+  private readonly clock: Clock;
+
   /**
-   * @param store - Backing counter store (in-memory or shared/Redis).
-   * @param clock - Time source; defaults to `Date.now`.
+   * @throws {RateLimiterConfigurationError} - when no rules are configured.
    */
-  constructor(
-    private readonly store: Store,
-    private readonly clock: Clock = { now: Date.now },
-  ) {}
+  constructor(options: SlidingWindowLimiterOptions<T>) {
+    if (options.rules.length === 0) {
+      throw new RateLimiterConfigurationError();
+    }
+    this.store = options.store;
+    this.rules = options.rules;
+    this.clock = options.clock ?? { now: Date.now };
+  }
 
   /**
    * Index of the current fixed window and how many seconds until it resets.
@@ -113,19 +95,35 @@ export class SlidingWindowLimiter {
   }
 
   /**
-   * Decide whether a request for `rule` is allowed, incrementing the counter.
+   * Ruling for `item` across every configured rule.
    *
-   * @param id - Logical client identity; the counter bucket is scoped to it, so
-   *   distinct ids never share a bucket.
-   * @param rule - The throttle rule to apply.
-   * @returns The decision with the budget mirrored for `X-RateLimit-*` headers.
+   * Each rule counts the hit against its own bucket (via
+   * {@link BucketRule.bucketOf}); the verdicts are folded by
+   * {@link RateLimitResult.isMoreRestrictiveThan} into one ruling — the first
+   * rule seeds it, a denying verdict beats an allowed tie, otherwise the
+   * lowest `remaining` wins, and the first rule keeps the ruling on an exact
+   * tie. The single `RateLimitResult` mirrors the ruling rule's budget for
+   * `X-RateLimit-*` headers.
+   *
    * @throws Propagates store failures; callers decide how to fail.
    */
-  async check(id: string, rule: RateLimitRule): Promise<RateLimitResult> {
+  async check(item: T): Promise<RateLimitResult> {
+    const [first, ...rest] = this.rules;
+    let ruling = await this.checkBucket(first.bucketOf(item), first.rule);
+    for (const { bucketOf, rule } of rest) {
+      const result = await this.checkBucket(bucketOf(item), rule);
+      if (result.isMoreRestrictiveThan(ruling)) {
+        ruling = result;
+      }
+    }
+    return ruling;
+  }
+
+  private async checkBucket(bucket: string, rule: RateLimitRule): Promise<RateLimitResult> {
     const now = this.clock.now();
     const { index, reset } = this.windowInfo(now, rule.windowMs);
 
-    const res: IncrementResult = await this.store.increment(id, rule.windowMs, index);
+    const res: IncrementResult = await this.store.increment(bucket, rule.windowMs, index);
 
     const elapsed = now - index * rule.windowMs;
     const sectionWeight = elapsed / rule.windowMs; // 0..1, how far into window we are
@@ -135,6 +133,6 @@ export class SlidingWindowLimiter {
     const allowed = effectiveCount <= rule.maxRequests;
     const retryAfter = allowed ? undefined : Math.max(1, Math.ceil((reset * 1000 - now) / 1000));
 
-    return { allowed, limit: rule.maxRequests, remaining, reset, retryAfter };
+    return new RateLimitResult(allowed, rule.maxRequests, remaining, reset, retryAfter);
   }
 }

@@ -18,8 +18,8 @@ npm run build       # tsc -> dist/
 npm test            # jest --runInBand
 ```
 
-`npm start` serves the library entry (`dist/index.js`); there is no HTTP
-server yet.
+`npm start` serves the library entry (`dist/index.js`); HTTP behavior is
+exercised by the reference demo (below).
 
 ## Quick start (Docker)
 
@@ -82,13 +82,38 @@ docker compose exec redis redis-cli KEYS 'rl:*'
 
 Stop and wipe when done: `docker compose down -v`.
 
+## Reference demo (HTTP)
+
+`demo/` is a separate npm project that consumes the *packed* library by package
+name (`import { SlidingWindowLimiter } from 'rate-limiter'`) — the same artifact
+shape as a published package. It shows rule authoring (`BucketRule[]`: each rule
+is a `bucketOf(item)` closure plus a `RateLimitRule`) and the request/response
+wiring around `check(item)`.
+
+From `demo/`:
+
+```sh
+npm run demo:install   # npm pack the lib → rate-limiter-1.0.0.tgz → npm ci here
+npm test               # supertest suite (per-IP, per-IP+endpoint, 429 + Retry-After)
+npm start              # listens on $PORT (default 3000)
+```
+
+The running server trusts `X-Forwarded-For` (Express `trust proxy`), so per-IP
+rules work through a reverse proxy. Try it:
+
+```sh
+curl -i -H 'X-Forwarded-For: 1.2.3.4' http://localhost:3000/api/route
+```
+
 ## Layout
 
 ```
 src/
-  domain/sliding-window.ts   # core algorithm + domain types + Store/Clock ports
+  domain/sliding-window.ts   # core algorithm + rule vocabulary
+  domain/rate-limit-result.ts # RateLimitResult value object
+  domain/ports.ts            # Store / Clock / IncrementResult ports
   domain/*.test.ts           # co-located tests
-  adapter/                   # ports' implementations (memory store, HTTP, circuit breaker)
+  adapter/                   # ports' implementations (memory store, circuit breaker)
 ```
 
 Tests are co-located next to their subjects. Concurrency/edge suites and the

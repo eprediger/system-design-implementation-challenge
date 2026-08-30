@@ -1,5 +1,5 @@
 import Redis from 'ioredis';
-import type { IncrementResult, Store } from '../domain/sliding-window';
+import type { IncrementResult, Store } from '../domain/ports';
 
 const KEY_PREFIX = 'rl';
 

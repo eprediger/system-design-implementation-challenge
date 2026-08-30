@@ -37,22 +37,28 @@
 ## 2. Architecture
 
 ```
-Request → Middleware → extract key(s) → RateLimiter.check(key, rule) → Response
-                                                          │
-                                                    CircuitBreaker
-                                                    Redis ⇄ in-memory fallback
+Hit → Consumer middleware → SlidingWindowLimiter.check(hit) → Response
+                                        │
+                     per rule: bucketOf(item) → bucket counter
+                                        │
+                                  CircuitBreaker
+                                  Redis ⇄ in-memory fallback
 ```
 
 ### Component map
 
 | Component         | File                          | Responsibility                                              |
 | ----------------- | ----------------------------- | ----------------------------------------------------------- |
-| Rules             | `domain/rules.ts` (planned)   | Define global / per-IP / per-endpoint limits                |
-| Rate limiter core | `domain/sliding-window.ts`    | Algorithm + domain types + `Store` / `Clock` ports          |
-| HTTP adapter      | `adapter/http.ts`             | Extract key, run checks, set headers, return 429            |
+| Rules             | consumer-declared `BucketRule[]` | `bucketOf(item)` + `RateLimitRule` per counter bucket       |
+| Rate limiter core | `domain/sliding-window.ts`    | Algorithm + domain types + `BucketRule` / `SlidingWindowLimiterOptions`     |
+| Rate limit result | `domain/rate-limit-result.ts` | `RateLimitResult` value object + most-restrictive ruling comparison |
+| Domain ports      | `domain/ports.ts`             | Driven ports (`Store`, `Clock`, `IncrementResult`) — domain owns them    |
 | Memory store      | `adapter/memory-store.ts`     | In-process fallback (Map + expiry), implements `Store` port |
-| Redis store       | `adapter/redis.ts` (planned)  | Atomic Lua scripts, shared state, implements `Store` port   |
+| Redis store       | `adapter/redis.ts`            | Atomic Lua scripts, shared state, implements `Store` port   |
 | Circuit breaker   | `adapter/circuit-breaker.ts`  | Closed/Open/Half-open state machine                         |
+
+HTTP handling (deriving `bucketOf` from the request, `trust proxy`, headers,
+429 rendering) lives in the reference consumer `demo/`, outside the library.
 
 ---
 
@@ -132,19 +138,46 @@ allowed        = effectiveCount <= maxRequests
 
 ## 4. Rules
 
-Three hard-coded rules; keys derived in the middleware, not via a plugin system:
+Rules are declared by the consumer as `BucketRule[]`: each pairs a
+`RateLimitRule` (the budget) with a `bucketOf(item)` closure that maps the
+checked item to its counter bucket. The library declares the signature but
+never decides what a bucket means (IP, endpoint, tenant, ...), so it stays
+blind to its client's domain.
 
 ```ts
-{ key: 'global',        windowMs: 60_000, maxRequests: 1000                  }
-{ key: 'ip',            windowMs: 60_000, maxRequests: 100                   }
-{ key: 'auth-route',    windowMs: 60_000, maxRequests: 10, pathPattern: '/api/auth/*' }
+const rules: Array<BucketRule<Request>> = [
+  { bucketOf: () => 'global',           rule: { windowMs: 60_000, maxRequests: 1000 } },
+  { bucketOf: h => h.ip,                rule: { windowMs: 60_000, maxRequests: 100 } },
+  { bucketOf: h => `${h.ip}:${h.path}`, rule: { windowMs: 60_000, maxRequests: 10 } },
+];
 ```
 
-### Why no extractor system
+### Why bucket derivation rides on the rule
 
-The spec suggests `byIP` / `byUserID` / `byAPIKey` / `byPath` / `composite`
-extractors. For our three rules the "extractor" is trivial: `req.ip`, `req.path`,
-or a constant. A class hierarchy for key derivation is over-engineering.
+The candidate alternative was a descriptor/extractor system — rules as pure
+config data (`{ key: 'ip', ... }`) resolved by the library, the pattern in the
+Lyft example. Rejected: a descriptor references a bucket through a separate
+resolver registry, and a rule whose descriptor has no resolver is an undefined
+function call mid-request. A closure co-located on the rule makes that
+impossible structurally: a rule cannot exist without its `bucketOf`.
+
+Trade-off accepted: rules are code, not serializable config. If a consumer
+wants file-driven rules later, the binder maps descriptor → `bucketOf` at load
+and fails loudly on unknown descriptors — a startup error, never undefined
+behavior at request time.
+
+### Error handling
+
+- **Configuration invariants** — a limiter built with zero rules throws a typed
+  `RateLimiterConfigurationError` from its constructor (used via `instanceof`
+  at the composition root). Startup misconfiguration fails fast and loud,
+  never as a silently permissive limiter.
+- **Budget violations** — are *results*, not exceptions: `RateLimitResult`
+  carries `allowed: false`, `remaining`, and `retryAfter`. The rate limit is
+  exercised per hit, so the hot path stays exception-free.
+- **Infrastructure failures** (store down in `check`) — propagate as exceptions
+  and are absorbed by the circuit breaker's fail-open policy; consumers never
+  catch per-request store errors in normal operation.
 
 ---
 
@@ -193,6 +226,15 @@ Fail-open: if the store operation errors at any point, the request is served
 
 ## 7. Middleware / HTTP Contract
 
+Bucket derivation and the most-restrictive aggregation are implemented in
+`SlidingWindowLimiter.check`: each configured rule maps the item to its bucket
+via `bucketOf`, counts it, and the verdicts are folded into one ruling (a
+denial beats an allowed tie; otherwise the lowest `remaining` wins; the first
+rule wins an exact tie). The comparison lives on the `RateLimitResult` value
+object (`isMoreRestrictiveThan`), so the limiter orchestrates without reaching
+into result fields. Consumers only render HTTP — they hand the check the item
+and translate the ruling result.
+
 - Allowed: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`
 - Throttled: above + HTTP 429 + `Retry-After` + JSON body describing the state
 - Fail-open: still sets headers based on in-memory fallback result
@@ -225,7 +267,7 @@ its subject (`*.test.ts` next to the module it tests).
 
 | Suite                       | Location                              | Coverage                                                            |
 | --------------------------- | ------------------------------------- | ------------------------------------------------------------------- |
-| sliding-window              | `src/domain/sliding-window.test.ts`   | within limit, at limit, reset, boundary, zero limit, single request |
+| sliding-window              | `src/domain/sliding-window.test.ts`   | within limit, at limit, reset, boundary, zero limit, single rule, multi-rule aggregation (most restrictive, denial-wins-tie, first-on-tie), empty-rules construction throw |
 | memory store                | `src/adapter/memory-store.test.ts`    | unit                                                                 |
 | redis store                 | `src/adapter/redis.test.ts`           | integration, skips if unavailable                                    |
 | circuit-breaker             | `src/adapter/circuit-breaker.test.ts` | all state transitions                                               |

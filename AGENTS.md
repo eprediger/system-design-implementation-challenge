@@ -19,27 +19,31 @@ docker compose down -v        # stop and drop the volume
 - One-shot: `docker run --rm rate-limiter-dev npm test`. With Redis up, the integration suite needs the host network so the container's `127.0.0.1:6379` reaches the compose service (plain run silently skips it): `docker run --rm --network host -v "$PWD:/app" -w /app rate-limiter-dev npm test`.
 - `REDIS_URL` (default `redis://127.0.0.1:6379`) points the suite at a different instance; CI provides Redis as a job service, so no flag is needed there.
 
-Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; there is no lint script), `npm run build` (`tsc` → `dist/`), `npm test` (`jest --runInBand`). `npm start` serves the lib entry only — HTTP comes with the reference demo (`demo/`, not yet implemented).
+Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; there is no lint script), `npm run build` (`tsc` → `dist/`), `npm test` (`jest --runInBand`). `npm start` serves the lib entry only — HTTP comes with the reference demo (`demo/`).
 
 ## Workflow & style
 
 - BDD/TDD: tests written first (red), implementation second (green), given/when/then in `describe`/`it`. Spec acceptance criteria map directly to test cases.
+- Docs are kept in sync with the code increment-by-increment: any change to the public API or architecture updates `DESIGN.md` / root `README.md` / this file in the same pass. No end-of-work documentation batch.
 - Tests are co-located: `*.test.ts` sits beside the module it tests under `src/` (jest `roots` = `src/`); the build excludes test files.
 - Architecture policy (target): Hexagonal Architecture + DDD — domain core isolated from infrastructure, ports & adapters, framework-agnostic HTTP middleware. Current code does not fully conform yet; convergence is a deferred refactor, a separate task from feature work (don't restructure mid-feature).
 - Strict TS, CommonJS. Keep code minimal; mark deliberate corner-cuts with a `ponytail:` comment.
 
 ## Structure
 
-- `src/domain/sliding-window.ts` — algorithm + all domain types (`RateLimitRule`, `RateLimitResult`) + driven ports (`Store`, `Clock`). Domain owns its ports; adapters import them.
-- `src/adapter/` — `memory-store.ts` (in-memory `Store` impl), `http.ts` (connect-style HTTP middleware, exports `rateLimitMiddleware`), `circuit-breaker.ts`.
+- `src/domain/sliding-window.ts` — algorithm (`SlidingWindowLimiter`) + the rule vocabulary (`RateLimitRule`, `BucketRule<T>`, `SlidingWindowLimiterOptions`) + `RateLimiterConfigurationError`.
+- `src/domain/rate-limit-result.ts` — the `RateLimitResult` value object and its ruling comparison (`isMoreRestrictiveThan`).
+- `src/domain/ports.ts` — driven ports (`Store`, `Clock`, `IncrementResult`). Domain owns its ports; adapters import them.
+- `src/adapter/` — `memory-store.ts` (in-memory `Store` impl), `circuit-breaker.ts`.
 - `src/index.ts` — composition root re-exporting the public API.
+- `demo/` (outside the lib) — reference HTTP consumer: consumes the packed `rate-limiter` tarball by package name; `createApp(rules: BucketRule[])` builds the limiter, middleware calls `check(req)` and renders headers/429.
 
 ## Locked-in decisions (do not reinvent)
 
 - Express, ioredis, Jest. Sliding-window counter (O(1) time/space), NOT sliding-window-log (O(n)).
 - `Store` interface with two impls: Redis-backed (atomic Lua scripts) and in-memory fallback.
 - Circuit breaker closed → open → half-open; fail-open (serve, don't block) on Redis failure. The breaker class exists but is not yet wired into the middleware.
-- Rules: global, per-IP, per-endpoint `pathPattern`. No extractor/plugin system, no schema-validation lib (TS types cover config; Express parses request fields).
+- Rules: consumer-declared `BucketRule[]` — each pairs a `RateLimitRule` with a `bucketOf(item)` closure; the limiter calls `bucketOf` internally (per rule) and returns one ruling. No descriptor/extractor registry (a rule and its bucket derivation are one object), no schema-validation lib (TS types cover config; Express parses request fields).
 - `DESIGN.md` is a living WIP — update it as decisions are made.
 - Metrics (`/metrics`, prom-client) is deferred, on the roadmap; implement only if time permits.
 

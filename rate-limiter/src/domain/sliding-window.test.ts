@@ -1,4 +1,9 @@
-import { SlidingWindowLimiter, type Store } from './sliding-window';
+import {
+  RateLimiterConfigurationError,
+  SlidingWindowLimiter,
+  type RateLimitRule,
+} from './sliding-window';
+import type { Store } from './ports';
 import { MemoryStore } from '../adapter/memory-store';
 
 const windowMs = 60_000;
@@ -6,25 +11,30 @@ const rule = { windowMs, maxRequests: 3 };
 
 describe('Given a sliding window rate limit rule', () => {
   let store: MemoryStore;
-  let limiter: SlidingWindowLimiter;
   let now: number;
 
   beforeEach(() => {
     now = 0;
     store = new MemoryStore({ now: () => now });
-    limiter = new SlidingWindowLimiter(store, { now: () => now });
   });
 
+  function limiterFor<T>(rules: Array<{ bucketOf: (item: T) => string; rule: RateLimitRule }>) {
+    return new SlidingWindowLimiter<T>({ store, clock: { now: () => now }, rules });
+  }
+
+  const single = (bucketOf: (item: unknown) => string, customRule: RateLimitRule = rule) =>
+    limiterFor<unknown>([{ bucketOf, rule: customRule }]);
+
   describe('Given a client has not exceeded their limit', () => {
-    it('when they make a request, then it is allowed with correct remaining count', async () => {
-      const result = await limiter.check('key', rule);
+    it('when they make a hit, then it is allowed with correct remaining count', async () => {
+      const result = await single(() => 'key').check({});
       expect(result.allowed).toBe(true);
       expect(result.remaining).toBe(2);
       expect(result.limit).toBe(3);
     });
 
     it('returns all required fields', async () => {
-      const result = await limiter.check('key', rule);
+      const result = await single(() => 'key').check({});
       expect(result).toHaveProperty('allowed', true);
       expect(result).toHaveProperty('limit', 3);
       expect(result).toHaveProperty('remaining', 2);
@@ -33,14 +43,12 @@ describe('Given a sliding window rate limit rule', () => {
   });
 
   describe('Given a client has exactly reached their limit', () => {
-    beforeEach(async () => {
-      await limiter.check('key', rule);
-      await limiter.check('key', rule);
-      await limiter.check('key', rule);
-    });
-
-    it('when they make another request, then it is throttled', async () => {
-      const result = await limiter.check('key', rule);
+    it('when they make another hit, then it is throttled', async () => {
+      const limiter = single(() => 'key');
+      await limiter.check({});
+      await limiter.check({});
+      await limiter.check({});
+      const result = await limiter.check({});
       expect(result.allowed).toBe(false);
       expect(result.remaining).toBe(0);
       expect(result.retryAfter).toBeDefined();
@@ -48,69 +56,124 @@ describe('Given a sliding window rate limit rule', () => {
   });
 
   describe('Given the time window resets', () => {
-    it('when a request arrives after the reset, then the sliding window allows it', async () => {
-      await limiter.check('key', rule);
-      await limiter.check('key', rule);
-      await limiter.check('key', rule);
-      const before = await limiter.check('key', rule);
+    it('when a hit arrives after the reset, then the sliding window allows it', async () => {
+      const limiter = single(() => 'key');
+      await limiter.check({});
+      await limiter.check({});
+      await limiter.check({});
+      const before = await limiter.check({});
       expect(before.allowed).toBe(false);
 
-      // Note: the denied request above still count toward window 0 (window 0
+      // Note: the denied hit above still counts toward window 0 (window 0
       // now holds 4). Jump 60% into window 1: window 0's weight has decayed to
-      // 4 * (1 - 0.6) = 1.6, plus 1 fresh request = 2.6 <= 3, so it is allowed.
+      // 4 * (1 - 0.6) = 1.6, plus 1 fresh hit = 2.6 <= 3, so it is allowed.
       now = windowMs + 0.6 * windowMs;
-      const after = await limiter.check('key', rule);
+      const after = await limiter.check({});
       expect(after.allowed).toBe(true);
     });
   });
 
   describe('Given the exact limit boundary', () => {
-    it('when exactly maxRequests requests arrive, then each is handled correctly', async () => {
-      const first = await limiter.check('key', { ...rule, maxRequests: 1 });
+    it('when exactly maxRequests hits arrive, then each is handled correctly', async () => {
+      const limiter = single(() => 'key', { ...rule, maxRequests: 1 });
+      const first = await limiter.check({});
       expect(first.allowed).toBe(true);
       expect(first.remaining).toBe(0);
-      const second = await limiter.check('key', { ...rule, maxRequests: 1 });
+      const second = await limiter.check({});
       expect(second.allowed).toBe(false);
     });
   });
 
   describe('Given a zero limit', () => {
-    it('when any request arrives, then all are rejected', async () => {
-      const result = await limiter.check('key', { ...rule, maxRequests: 0 });
+    it('when any hit arrives, then all are rejected', async () => {
+      const result = await single(() => 'key', { ...rule, maxRequests: 0 }).check({});
       expect(result.allowed).toBe(false);
       expect(result.remaining).toBe(0);
     });
   });
 
-  describe('Given a single request', () => {
-    it('when it is the first, then it is allowed and the next is throttled', async () => {
-      const first = await limiter.check('key', { ...rule, maxRequests: 1 });
+  describe('Given a single rule', () => {
+    it('when it is the first hit, then it is allowed and the next is throttled', async () => {
+      const limiter = single(() => 'key', { ...rule, maxRequests: 1 });
+      const first = await limiter.check({});
       expect(first.allowed).toBe(true);
-      const second = await limiter.check('key', { ...rule, maxRequests: 1 });
+      const second = await limiter.check({});
       expect(second.allowed).toBe(false);
     });
   });
 
-  describe('Given requests spanning a window boundary', () => {
+  describe('Given hits spanning a window boundary', () => {
     it('weights previous window usage by how much time has elapsed', async () => {
-      await limiter.check('key', rule); // window 0
+      const limiter = single(() => 'key');
+      await limiter.check({}); // window 0
       now = windowMs + 1; // move into window 1 almost entirely
-      limiter.check('key', rule);
+      limiter.check({});
       now = windowMs + 1;
-      const result = await limiter.check('key', rule);
-      // only 1 request in the far-right of window 1, previous window is fully expired
+      const result = await limiter.check({});
+      // only 1 hit in the far-right of window 1, previous window is fully expired
       expect(result.allowed).toBe(true);
     });
   });
 
-  describe('Given two distinct client identities sharing a rule', () => {
+  describe('Given two distinct identities sharing a rule', () => {
     it('when one exhausts its allowance, then the other is unaffected', async () => {
-      await limiter.check('alice', rule);
-      await limiter.check('alice', rule);
-      await limiter.check('alice', rule);
-      const bobFirst = await limiter.check('bob', rule);
+      const limiter = limiterFor<string>([{ bucketOf: (id) => id, rule }]);
+      await limiter.check('alice');
+      await limiter.check('alice');
+      await limiter.check('alice');
+      const bobFirst = await limiter.check('bob');
       expect(bobFirst.allowed).toBe(true);
       expect(bobFirst.remaining).toBe(2);
+    });
+  });
+
+  describe('Given several rules apply to one hit', () => {
+    it('when all are allowed, then the most restrictive one is reported', async () => {
+      const limiter = limiterFor<unknown>([
+        { bucketOf: () => 'global', rule: { windowMs, maxRequests: 5 } },
+        { bucketOf: () => '10.0.0.1:/api', rule: { windowMs, maxRequests: 2 } },
+      ]);
+      const result = await limiter.check({});
+      expect(result.allowed).toBe(true);
+      expect(result.limit).toBe(2);
+      expect(result.remaining).toBe(1);
+    });
+
+    it('when one denies, then a denial beats an allowed tie (regression)', async () => {
+      const limiter = limiterFor<unknown>([
+        { bucketOf: () => 'global', rule: { windowMs, maxRequests: 3 } },
+        { bucketOf: () => '10.0.0.1:/api', rule: { windowMs, maxRequests: 2 } },
+      ]);
+      await limiter.check({});
+      await limiter.check({});
+      const third = await limiter.check({});
+      // global is still within budget (3 <= 3, so it reports remaining 0 but
+      // allowed=true); the endpoint budget denies. The denial must win.
+      expect(third.allowed).toBe(false);
+      expect(third.limit).toBe(2);
+      expect(third.remaining).toBe(0);
+      expect(third.retryAfter).toBeDefined();
+    });
+
+    it('when all deny, then the first rule wins the tie deterministically', async () => {
+      const limiter = limiterFor<unknown>([
+        { bucketOf: () => 'a', rule: { windowMs, maxRequests: 2 } },
+        { bucketOf: () => 'b', rule: { windowMs, maxRequests: 1 } },
+      ]);
+      await limiter.check({});
+      await limiter.check({});
+      const third = await limiter.check({});
+      expect(third.allowed).toBe(false);
+      expect(third.limit).toBe(2); // first rule is reported on the exact tie
+      expect(third.remaining).toBe(0);
+    });
+  });
+
+  describe('Given the limiter is constructed', () => {
+    it('when no rules are configured, then it throws a typed configuration error', () => {
+      expect(() => new SlidingWindowLimiter({ store, rules: [] })).toThrow(
+        RateLimiterConfigurationError,
+      );
     });
   });
 
@@ -123,8 +186,12 @@ describe('Given a sliding window rate limit rule', () => {
         ping: () => Promise.resolve(true),
         close: () => Promise.resolve(),
       };
-      const failingLimiter = new SlidingWindowLimiter(failing, { now: () => now });
-      await expect(failingLimiter.check('key', rule)).rejects.toThrow('boom');
+      const failingLimiter = new SlidingWindowLimiter({
+        store: failing,
+        clock: { now: () => now },
+        rules: [{ bucketOf: () => 'key', rule }],
+      });
+      await expect(failingLimiter.check({})).rejects.toThrow('boom');
     });
   });
 });

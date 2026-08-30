@@ -1,4 +1,4 @@
-import type { IncrementResult, Store } from '../domain/sliding-window';
+import type { IncrementResult, Store } from '../domain/ports';
 
 interface Bucket {
   count: number;

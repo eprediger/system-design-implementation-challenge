@@ -1,32 +1,39 @@
-import { SlidingWindowLimiter } from './sliding-window';
+import { SlidingWindowLimiter, type RateLimitRule } from './sliding-window';
 import { MemoryStore } from '../adapter/memory-store';
 
-function makeLimiter() {
-  return new SlidingWindowLimiter(new MemoryStore());
+function makeLimiter(bucketOf: () => string, rule: RateLimitRule) {
+  return new SlidingWindowLimiter({
+    store: new MemoryStore(),
+    rules: [{ bucketOf, rule }],
+  });
 }
 
-describe('Given concurrent requests against a sliding window limiter', () => {
-  it('when 100 concurrent requests with a limit of 50 are submitted, then exactly 50 are allowed', async () => {
-    const limiter = makeLimiter();
-    const rule = { key: 'k', windowMs: 60_000, maxRequests: 50 };
-    const results = await Promise.all(Array.from({ length: 100 }, () => limiter.check('key', rule)));
+describe('Given concurrent hits against a sliding window limiter', () => {
+  it('when 100 concurrent hits with a limit of 50 are submitted, then exactly 50 are allowed', async () => {
+    const limiter = makeLimiter(() => 'k', { windowMs: 60_000, maxRequests: 50 });
+    const results = await Promise.all(Array.from({ length: 100 }, () => limiter.check({})));
     expect(results.filter((r) => r.allowed)).toHaveLength(50);
     expect(results.filter((r) => !r.allowed)).toHaveLength(50);
   });
 
-  it('when 1000 concurrent requests with a limit of 100 are submitted, then exactly 100 are allowed', async () => {
-    const limiter = makeLimiter();
-    const rule = { key: 'k', windowMs: 60_000, maxRequests: 100 };
-    const results = await Promise.all(Array.from({ length: 1000 }, () => limiter.check('key', rule)));
+  it('when 1000 concurrent hits with a limit of 100 are submitted, then exactly 100 are allowed', async () => {
+    const limiter = makeLimiter(() => 'k', { windowMs: 60_000, maxRequests: 100 });
+    const results = await Promise.all(Array.from({ length: 1000 }, () => limiter.check({})));
     expect(results.filter((r) => r.allowed)).toHaveLength(100);
   });
 
-  it('when multiple keys are used concurrently, counters stay independent', async () => {
-    const limiter = makeLimiter();
-    const ruleA = { key: 'a', windowMs: 60_000, maxRequests: 100 };
-    const ruleB = { key: 'b', windowMs: 60_000, maxRequests: 1 };
+  it('when buckets are hit concurrently through shared storage, counters stay independent', async () => {
+    const store = new MemoryStore();
+    const limiterA = new SlidingWindowLimiter({
+      store,
+      rules: [{ bucketOf: () => 'key-a', rule: { windowMs: 60_000, maxRequests: 100 } }],
+    });
+    const limiterB = new SlidingWindowLimiter({
+      store,
+      rules: [{ bucketOf: () => 'key-b', rule: { windowMs: 60_000, maxRequests: 1 } }],
+    });
     const all = Array.from({ length: 200 }, (_, i) =>
-      i % 2 === 0 ? limiter.check('key-a', ruleA) : limiter.check('key-b', ruleB),
+      i % 2 === 0 ? limiterA.check({}) : limiterB.check({}),
     );
     const results = await Promise.all(all);
     const aResults = results.filter((_, i) => i % 2 === 0);
@@ -35,10 +42,9 @@ describe('Given concurrent requests against a sliding window limiter', () => {
     expect(bResults.filter((r) => r.allowed)).toHaveLength(1);
   });
 
-  it('10k total requests complete with limits enforced', async () => {
-    const limiter = makeLimiter();
-    const rule = { key: 'k', windowMs: 60_000, maxRequests: 100 };
-    const results = await Promise.all(Array.from({ length: 10_000 }, () => limiter.check('key', rule)));
+  it('10k total hits complete with limits enforced', async () => {
+    const limiter = makeLimiter(() => 'k', { windowMs: 60_000, maxRequests: 100 });
+    const results = await Promise.all(Array.from({ length: 10_000 }, () => limiter.check({})));
     expect(results.filter((r) => r.allowed)).toHaveLength(100);
     expect(results).toHaveLength(10_000);
   });

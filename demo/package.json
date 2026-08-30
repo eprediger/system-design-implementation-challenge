@@ -1,0 +1,32 @@
+{
+  "name": "demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reference HTTP consumer for the rate-limiter library",
+  "type": "commonjs",
+  "main": "dist/server.js",
+  "scripts": {
+    "demo:install": "cd ../rate-limiter && npm pack && cd ../demo && npm ci",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "jest --runInBand",
+    "start": "node dist/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "rate-limiter": "file:../rate-limiter/rate-limiter-1.0.0.tgz"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.4.0",
+    "@types/supertest": "^7.2.1",
+    "jest": "^30.4.2",
+    "supertest": "^7.2.2",
+    "ts-jest": "^29.4.12",
+    "typescript": "^5.9.3"
+  }
+}
