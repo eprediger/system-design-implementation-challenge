@@ -47,15 +47,15 @@ Hit → Consumer middleware → SlidingWindowLimiter.check(hit) → Response
 
 ### Component map
 
-| Component         | File                          | Responsibility                                              |
-| ----------------- | ----------------------------- | ----------------------------------------------------------- |
-| Rules             | consumer-declared `BucketRule[]` | `bucketOf(item)` + `RateLimitRule` per counter bucket       |
-| Rate limiter core | `domain/sliding-window.ts`    | Algorithm + domain types + `BucketRule` / `SlidingWindowLimiterOptions`     |
-| Rate limit result | `domain/rate-limit-result.ts` | `RateLimitResult` value object + most-restrictive ruling comparison |
-| Domain ports      | `domain/ports.ts`             | Driven ports (`Store`, `Clock`, `IncrementResult`) — domain owns them    |
-| Memory store      | `adapter/memory-store.ts`     | In-process fallback (Map + expiry), implements `Store` port |
-| Redis store       | `adapter/redis.ts`            | Atomic Lua scripts, shared state, implements `Store` port   |
-| Circuit breaker   | `adapter/circuit-breaker.ts`  | Closed/Open/Half-open state machine                         |
+| Component         | File                             | Responsibility                                                          |
+| ----------------- | -------------------------------- | ----------------------------------------------------------------------- |
+| Rules             | consumer-declared `BucketRule[]` | `bucketOf(item)` + `RateLimitRule` per counter bucket                   |
+| Rate limiter core | `domain/sliding-window.ts`       | Algorithm + domain types + `BucketRule` / `SlidingWindowLimiterOptions` |
+| Rate limit result | `domain/rate-limit-result.ts`    | `RateLimitResult` value object + most-restrictive ruling comparison     |
+| Domain ports      | `domain/ports.ts`                | Driven ports (`Store`, `Clock`, `IncrementResult`) — domain owns them   |
+| Memory store      | `adapter/memory-store.ts`        | In-process fallback (Map + expiry), implements `Store` port             |
+| Redis store       | `adapter/redis.ts`               | Atomic Lua scripts, shared state, implements `Store` port               |
+| Circuit breaker   | `adapter/circuit-breaker.ts`     | Closed/Open/Half-open state machine                                     |
 
 HTTP handling (deriving `bucketOf` from the request, `trust proxy`, headers,
 429 rendering) lives in the reference consumer `demo/`, outside the library.
@@ -212,15 +212,24 @@ because sliding window never needs unconditional sets.
 ```
 CLOSED (healthy) --N failures--> OPEN (fallback) --timeout--> HALF_OPEN (test) --M successes--> CLOSED
       ^                                                                                 │
-      └──────────────────────────── failure reopens → ─────────────────────────────────┘
+      └──────────────────────────── failure reopens → ──────────────────────────────────┘
 ```
 
 - **CLOSED:** checks go to Redis. Consecutive failures increment a counter.
 - **OPEN:** Redis skipped, in-memory fallback used. After a timeout → HALF_OPEN.
 - **HALF_OPEN:** a limited probe goes to Redis. Success → CLOSED; failure → OPEN.
 
-Fail-open: if the store operation errors at any point, the request is served
-(and rate limited in-memory) rather than blocked. Errors are logged at WARN.
+Wired as `FailOpenStore` (`adapter/fail-open-store.ts`): a `Store` composing the
+primary (Redis), the breaker, and an in-memory fallback. Every operation runs
+through the breaker; on any failure — a tripped circuit or a throwing primary —
+it logs at WARN and serves from the fallback, so requests are rate limited
+(from memory) rather than blocked. Recovery is automatic: the half-open probe
+decides whether to close the circuit and re-use Redis. `RedisStore` fails fast
+(no offline queue, bounded reconnect) so a down Redis surfaces to the wrapper
+quickly instead of hanging requests behind ioredis's retry queue.
+
+US-5's "logged, and metrics are updated" acceptance criterion is only half met:
+WARN logging is in place; metrics stay deferred to the `/metrics` roadmap item.
 
 ---
 
@@ -265,13 +274,13 @@ Tests are written first (red), implementation second (green), expressed as
 given/when/then via Jest `describe`/`it`. Each test file is co-located beside
 its subject (`*.test.ts` next to the module it tests).
 
-| Suite                       | Location                              | Coverage                                                            |
-| --------------------------- | ------------------------------------- | ------------------------------------------------------------------- |
-| sliding-window              | `src/domain/sliding-window.test.ts`   | within limit, at limit, reset, boundary, zero limit, single rule, multi-rule aggregation (most restrictive, denial-wins-tie, first-on-tie), empty-rules construction throw |
-| memory store                | `src/adapter/memory-store.test.ts`    | unit                                                                 |
-| redis store                 | `src/adapter/redis.test.ts`           | integration, skips if unavailable                                    |
-| circuit-breaker             | `src/adapter/circuit-breaker.test.ts` | all state transitions                                               |
-| concurrency                 | `src/domain/concurrency.test.ts`      | 100 concurrent / limit 50 → exactly 50 allowed                      |
+| Suite           | Location                              | Coverage                                                                                                                                                                   |
+| --------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sliding-window  | `src/domain/sliding-window.test.ts`   | within limit, at limit, reset, boundary, zero limit, single rule, multi-rule aggregation (most restrictive, denial-wins-tie, first-on-tie), empty-rules construction throw |
+| memory store    | `src/adapter/memory-store.test.ts`    | unit                                                                                                                                                                       |
+| redis store     | `src/adapter/redis.test.ts`           | integration, skips if unavailable                                                                                                                                          |
+| circuit-breaker | `src/adapter/circuit-breaker.test.ts` | all state transitions                                                                                                                                                      |
+| concurrency     | `src/domain/concurrency.test.ts`      | 100 concurrent / limit 50 → exactly 50 allowed                                                                                                                             |
 
 Redis integration tests skip gracefully when no local Redis is available.
 

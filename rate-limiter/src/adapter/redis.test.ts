@@ -1,5 +1,8 @@
 import Redis from 'ioredis';
 import { RedisStore } from './redis';
+import { FailOpenStore } from './fail-open-store';
+import { CircuitBreaker } from './circuit-breaker';
+import { MemoryStore } from './memory-store';
 import { redisAvailable } from '../../jest/redis-available';
 
 const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
@@ -64,5 +67,35 @@ describeRedis('Given a Redis-backed store', () => {
 
   it('replies to a health probe', async () => {
     await expect(store.ping()).resolves.toBe(true);
+  });
+
+  it('serves through a fail-open store while Redis is reachable', async () => {
+    const failOpen = new FailOpenStore({
+      primary: new RedisStore(url),
+      breaker: new CircuitBreaker({ failureThreshold: 2, recoveryTimeoutMs: 30_000, successThreshold: 1 }),
+      fallback: new MemoryStore(),
+      warn: () => {},
+    });
+
+    await expect(failOpen.increment('sw-fo', windowMs, 0)).resolves.toEqual({ current: 1, previous: 0 });
+    await expect(failOpen.increment('sw-fo', windowMs, 0)).resolves.toEqual({ current: 2, previous: 0 });
+    await failOpen.close();
+  });
+
+  it('falls back to in-memory limiting when Redis is unreachable', async () => {
+    const warns: string[] = [];
+    const liveIndex = Math.floor(Date.now() / windowMs);
+    const failOpen = new FailOpenStore({
+      primary: new RedisStore('redis://127.0.0.1:6399'),
+      breaker: new CircuitBreaker({ failureThreshold: 2, recoveryTimeoutMs: 30_000, successThreshold: 1 }),
+      fallback: new MemoryStore(),
+      warn: (m) => warns.push(m),
+    });
+
+    await expect(failOpen.increment('sw-down', windowMs, liveIndex)).resolves.toEqual({ current: 1, previous: 0 });
+    await expect(failOpen.increment('sw-down', windowMs, liveIndex)).resolves.toEqual({ current: 2, previous: 0 });
+    await expect(failOpen.increment('sw-down', windowMs, liveIndex)).resolves.toEqual({ current: 3, previous: 0 });
+    expect(warns).toHaveLength(3);
+    await failOpen.close();
   });
 });

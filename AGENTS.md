@@ -34,7 +34,7 @@ Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; the
 - `src/domain/sliding-window.ts` — algorithm (`SlidingWindowLimiter`) + the rule vocabulary (`RateLimitRule`, `BucketRule<T>`, `SlidingWindowLimiterOptions`) + `RateLimiterConfigurationError`.
 - `src/domain/rate-limit-result.ts` — the `RateLimitResult` value object and its ruling comparison (`isMoreRestrictiveThan`).
 - `src/domain/ports.ts` — driven ports (`Store`, `Clock`, `IncrementResult`). Domain owns its ports; adapters import them.
-- `src/adapter/` — `memory-store.ts` (in-memory `Store` impl), `circuit-breaker.ts`.
+- `src/adapter/` — `memory-store.ts` (in-memory `Store` impl), `circuit-breaker.ts`, `fail-open-store.ts` (`Store` that serves from memory with a WARN when the primary is down or the circuit is open).
 - `src/index.ts` — composition root re-exporting the public API.
 - `demo/` (outside the lib) — reference HTTP consumer: consumes the packed `rate-limiter` tarball by package name; `createApp(rules: BucketRule[])` builds the limiter, middleware calls `check(req)` and renders headers/429.
 
@@ -42,7 +42,7 @@ Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; the
 
 - Express, ioredis, Jest. Sliding-window counter (O(1) time/space), NOT sliding-window-log (O(n)).
 - `Store` interface with two impls: Redis-backed (atomic Lua scripts) and in-memory fallback.
-- Circuit breaker closed → open → half-open; fail-open (serve, don't block) on Redis failure. The breaker class exists but is not yet wired into the middleware.
+- Circuit breaker closed → open → half-open; fail-open (serve, don't block) on Redis failure, wired via `FailOpenStore` (`adapter/fail-open-store.ts`).
 - Rules: consumer-declared `BucketRule[]` — each pairs a `RateLimitRule` with a `bucketOf(item)` closure; the limiter calls `bucketOf` internally (per rule) and returns one ruling. No descriptor/extractor registry (a rule and its bucket derivation are one object), no schema-validation lib (TS types cover config; Express parses request fields).
 - `DESIGN.md` is a living WIP — update it as decisions are made.
 - Metrics (`/metrics`, prom-client) is deferred, on the roadmap; implement only if time permits.

@@ -98,6 +98,19 @@ npm test               # supertest suite (per-IP, per-IP+endpoint, 429 + Retry-A
 npm start              # listens on $PORT (default 3000)
 ```
 
+The demo also demonstrates fault tolerance (US-5). Without `REDIS_URL` it uses
+an in-memory store directly. Set it to run the full stack — Redis first:
+
+```sh
+docker compose exec redis redis-cli ping   # confirm health
+REDIS_URL=redis://127.0.0.1:6379 npm start
+```
+
+The limiter then backs on `FailOpenStore`: `RedisStore` behind a circuit
+breaker with an in-memory fallback. Kill Redis (`docker compose stop redis`)
+and requests keep flowing, rate limited from memory, with WARN lines; restart
+it and the next half-open probe re-seats Redis after a few healthy checks.
+
 The running server trusts `X-Forwarded-For` (Express `trust proxy`), so per-IP
 rules work through a reverse proxy. Try it:
 
@@ -113,7 +126,7 @@ src/
   domain/rate-limit-result.ts # RateLimitResult value object
   domain/ports.ts            # Store / Clock / IncrementResult ports
   domain/*.test.ts           # co-located tests
-  adapter/                   # ports' implementations (memory store, circuit breaker)
+  adapter/                   # ports' implementations (memory store, circuit breaker, fail-open store)
 ```
 
 Tests are co-located next to their subjects. Concurrency/edge suites and the

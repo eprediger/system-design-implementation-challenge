@@ -30,7 +30,14 @@ export class RedisStore implements Store {
    * @param url - Full Redis connection URL, e.g. `redis://127.0.0.1:6379`.
    */
   constructor(url: string) {
-    this.redis = new Redis(url);
+    // Fail fast when Redis is down so the fail-open wrapper can serve instead
+    // of hanging a request behind ioredis's reconnect queue. `retryStrategy`
+    // returning null after a few attempts ends the client and rejects queued
+    // commands, so a dead Redis surfaces in ~1s.
+    this.redis = new Redis(url, {
+      connectTimeout: 2000,
+      retryStrategy: (times) => (times > 3 ? null : Math.min(times * 200, 1000)),
+    });
     this.redis.on('error', () => {});
   }
 
@@ -69,6 +76,12 @@ export class RedisStore implements Store {
 
   async close(): Promise<void> {
     if (this.redis.status === 'end') return;
-    await this.redis.quit();
+    if (this.redis.status === 'ready') {
+      await this.redis.quit();
+    } else {
+      // Fails-fast clients may never have connected; quit() needs a live
+      // connection, so drop it locally instead of round-tripping QUIT.
+      this.redis.disconnect();
+    }
   }
 }

@@ -1,8 +1,26 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { MemoryStore, SlidingWindowLimiter, type BucketRule } from 'rate-limiter';
+import {
+  CircuitBreaker,
+  FailOpenStore,
+  MemoryStore,
+  RedisStore,
+  SlidingWindowLimiter,
+  type BucketRule,
+  type Store,
+} from 'rate-limiter';
+
+function makeStore(): Store {
+  const url = process.env.REDIS_URL;
+  if (!url) return new MemoryStore();
+  return new FailOpenStore({
+    primary: new RedisStore(url),
+    breaker: new CircuitBreaker({ failureThreshold: 3, recoveryTimeoutMs: 30_000, successThreshold: 1 }),
+    fallback: new MemoryStore(),
+  });
+}
 
 export function createApp(rules: Array<BucketRule<Request>>) {
-  const limiter = new SlidingWindowLimiter({ store: new MemoryStore(), rules });
+  const limiter = new SlidingWindowLimiter({ store: makeStore(), rules });
   const app = express();
   app.set('trust proxy', true);
 
