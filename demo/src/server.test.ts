@@ -1,7 +1,7 @@
 import request from 'supertest';
 import type { Request } from 'express';
 import type { BucketRule } from 'rate-limiter';
-import { createApp } from './server';
+import { createApp, normalizePath } from './server';
 
 const perIp: BucketRule<Request> = {
   bucketOf: (req) => req.ip ?? 'unknown',
@@ -9,7 +9,8 @@ const perIp: BucketRule<Request> = {
 };
 
 const perIpEndpoint: BucketRule<Request> = {
-  bucketOf: (req) => `${req.ip ?? 'unknown'}:${req.path}`,
+  // Must mirror the server's own bucket derivation so both rules fold correctly.
+  bucketOf: (req) => `${req.ip ?? 'unknown'}:${req.method} ${normalizePath(req.path)}`,
   rule: { windowMs: 60_000, maxRequests: 2 },
 };
 

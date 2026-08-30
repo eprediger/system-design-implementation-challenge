@@ -19,10 +19,30 @@ function makeStore(): Store {
   });
 }
 
+/**
+ * Canonicalize a request path so spelling variants of the same endpoint share
+ * one counter bucket: percent-decoded, duplicate slashes collapsed.
+ */
+export function normalizePath(path: string): string {
+  try {
+    return decodeURIComponent(path).replace(/\/+/g, '/');
+  } catch {
+    return path; // malformed percent-encoding: keep the raw path as its own bucket
+  }
+}
+
+function perIpEndpointBucket(req: Request): string {
+  return `${req.ip ?? 'unknown'}:${req.method} ${normalizePath(req.path)}`;
+}
+
 export function createApp(rules: Array<BucketRule<Request>>, storeFactory: () => Store = makeStore) {
   const limiter = new SlidingWindowLimiter({ store: storeFactory(), rules });
   const app = express();
-  app.set('trust proxy', true);
+  // Only trust the proxy's X-Forwarded-For when the request is loopback, a
+  // remote client cannot spoof per-IP limits. Consumers behind a real proxy
+  // set TRUST_PROXY=true.
+  app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? true : 'loopback');
+  app.disable('x-powered-by');
 
   app.use(async (req: Request, res: Response, next: NextFunction) => {
     const ruling = await limiter.check(req);
@@ -34,7 +54,9 @@ export function createApp(rules: Array<BucketRule<Request>>, storeFactory: () =>
       return;
     }
 
-    res.set('Retry-After', String(ruling.retryAfter));
+    if (ruling.retryAfter !== undefined) {
+      res.set('Retry-After', String(ruling.retryAfter));
+    }
     res.status(429).json({
       error: 'Too Many Requests',
       message: `Rate limit exceeded. Try again in ${ruling.retryAfter} seconds.`,
@@ -58,7 +80,7 @@ if (require.main === module) {
     { bucketOf: () => 'global', rule: { windowMs: 60_000, maxRequests: 1000 } },
     { bucketOf: (req: Request) => req.ip ?? 'unknown', rule: { windowMs: 60_000, maxRequests: 100 } },
     {
-      bucketOf: (req: Request) => `${req.ip ?? 'unknown'}:${req.path}`,
+      bucketOf: perIpEndpointBucket,
       rule: { windowMs: 60_000, maxRequests: 10 },
     },
   ]).listen(port, () => console.log(`demo listening on :${port}`));

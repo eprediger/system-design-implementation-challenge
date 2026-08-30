@@ -1,10 +1,13 @@
 import request from 'supertest';
+import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import { RedisStore, type BucketRule, type Store } from 'rate-limiter';
 import { createApp } from './server';
 import { redisAvailable } from '../jest/redis-available';
 
 const describeRedis = redisAvailable ? describe : describe.skip;
+
+const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
 
 const perIp: BucketRule<Request> = {
   bucketOf: (req) => req.ip ?? 'unknown',
@@ -13,10 +16,10 @@ const perIp: BucketRule<Request> = {
 
 describeRedis('Given two server instances sharing one Redis', () => {
   it('enforces the per-client ceiling globally across both instances', async () => {
-    const token = `stress-${Date.now()}.invalid`;
+    const token = `stress-${randomUUID()}.invalid`;
     const stores: Store[] = [];
     const storeFactory = (): Store => {
-      const store = new RedisStore('redis://127.0.0.1:6379');
+      const store = new RedisStore(url);
       stores.push(store);
       return store;
     };

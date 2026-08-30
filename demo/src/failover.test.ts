@@ -1,5 +1,6 @@
 import net from 'node:net';
 import request from 'supertest';
+import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import { CircuitBreaker, FailOpenStore, MemoryStore, RedisStore, type BucketRule, type Store } from 'rate-limiter';
 import { createApp } from './server';
@@ -72,7 +73,7 @@ function createRelay(targetHost: string, targetPort: number) {
 type Relay = ReturnType<typeof createRelay>;
 
 describeRedis('Given two server instances whose Redis is fronted by a fault-injection relay', () => {
-  const token = `failover-${Date.now()}.invalid`;
+  const token = `failover-${randomUUID()}.invalid`;
   const warns: string[] = [];
   const breaker = new CircuitBreaker({ failureThreshold: 1, recoveryTimeoutMs: 500, successThreshold: 1 });
   const failOpens: FailOpenStore[] = [];
@@ -103,8 +104,14 @@ describeRedis('Given two server instances whose Redis is fronted by a fault-inje
   });
 
   it('serves through the relay to the shared Redis while it is up', async () => {
-    const res = await request(apps[0]).get('/api/route').set('X-Forwarded-For', token);
+    const res = await request(apps[0])
+      .get('/api/route')
+      .set('X-Forwarded-For', token)
+      .timeout({ response: 5000, deadline: 5000 });
     expect(res.status).toBe(200);
+    expect(res.headers['x-ratelimit-limit']).toBe('1000');
+    expect(res.headers['x-ratelimit-remaining']).toBeDefined();
+    expect(res.headers['x-ratelimit-reset']).toBeDefined();
     expect(breaker.state).toBe('CLOSED');
   });
 
@@ -116,6 +123,15 @@ describeRedis('Given two server instances whose Redis is fronted by a fault-inje
       ),
     );
     expect(responses.every((r) => r.status === 200)).toBe(true);
+    // Fail-open still mirrors the ruling into the rate-limit headers (US-6).
+    expect(
+      responses.every(
+        (r) =>
+          r.headers['x-ratelimit-limit'] === '1000' &&
+          r.headers['x-ratelimit-remaining'] !== undefined &&
+          r.headers['x-ratelimit-reset'] !== undefined,
+      ),
+    ).toBe(true);
     expect(breaker.state).toBe('OPEN');
     expect(warns.length).toBeGreaterThan(0);
     expect(warns.some((m) => m.includes('fail-open'))).toBe(true);
@@ -125,12 +141,18 @@ describeRedis('Given two server instances whose Redis is fronted by a fault-inje
     await relay.listen();
     await new Promise((resolve) => setTimeout(resolve, 600)); // past recoveryTimeoutMs
 
-    const res = await request(apps[0]).get('/api/route').set('X-Forwarded-For', token);
+    const res = await request(apps[0])
+      .get('/api/route')
+      .set('X-Forwarded-For', token)
+      .timeout({ response: 5000, deadline: 5000 });
     expect(res.status).toBe(200);
     expect(breaker.state).toBe('CLOSED');
 
     const warnsBefore = warns.length;
-    await request(apps[1]).get('/api/route').set('X-Forwarded-For', token);
+    await request(apps[1])
+      .get('/api/route')
+      .set('X-Forwarded-For', token)
+      .timeout({ response: 5000, deadline: 5000 });
     expect(warns).toHaveLength(warnsBefore);
   }, 10_000);
 });
