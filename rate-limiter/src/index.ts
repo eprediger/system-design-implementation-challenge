@@ -8,7 +8,7 @@ export type {
   RateLimitRule,
   SlidingWindowLimiterOptions,
 } from './domain/sliding-window';
-export type { Clock, IncrementResult, Store } from './domain/ports';
+export type { IncrementResult, Store } from './domain/ports';
 export type { Emitter, LimiterEvent } from './domain/events';
 
 export { MemoryStore } from './adapter/memory-store';

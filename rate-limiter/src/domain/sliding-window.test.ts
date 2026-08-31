@@ -20,7 +20,7 @@ describe('Given a sliding window rate limit rule', () => {
   });
 
   function limiterFor<T>(rules: Array<{ bucketOf: (item: T) => string; rule: RateLimitRule }>) {
-    return new SlidingWindowLimiter<T>({ store, clock: { now: () => now }, rules });
+    return new SlidingWindowLimiter<T>({ store, clock: () => now, rules });
   }
 
   const single = (bucketOf: (item: unknown) => string, customRule: RateLimitRule = rule) =>
@@ -227,7 +227,7 @@ describe('Given a sliding window rate limit rule', () => {
       };
       const failingLimiter = new SlidingWindowLimiter({
         store: failing,
-        clock: { now: () => now },
+        clock: () => now,
         rules: [{ bucketOf: () => 'key', rule }],
       });
       await expect(failingLimiter.check({})).rejects.toThrow('boom');
@@ -239,7 +239,7 @@ describe('Given a sliding window rate limit rule', () => {
       const events: LimiterEvent[] = [];
       const limiter = new SlidingWindowLimiter<unknown>({
         store,
-        clock: { now: () => now },
+        clock: () => now,
         rules: [
           { bucketOf: () => 'global', rule: { windowMs, maxRequests: 5 } },
           { bucketOf: () => 'ip', rule: { windowMs, maxRequests: 2 } },

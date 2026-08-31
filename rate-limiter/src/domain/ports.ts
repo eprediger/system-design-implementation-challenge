@@ -1,11 +1,4 @@
 /**
- * Source of time for window math. Injected so tests can drive the wall clock deterministically.
- */
-export interface Clock {
-  now(): number;
-}
-
-/**
  * Sliding-window-counter state for one window: the current window's count and
  * the previous window's count. The limiter blends them by how far into the
  * current window it is.

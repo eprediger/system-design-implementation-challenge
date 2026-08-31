@@ -1,6 +1,6 @@
 import { RateLimitResult } from './rate-limit-result';
 import type { Emitter } from './events';
-import type { Clock, IncrementResult, Store } from './ports';
+import type { IncrementResult, Store } from './ports';
 
 /**
  * A throttle rule: how many hits a client may make within a fixed window.
@@ -52,7 +52,7 @@ export interface SlidingWindowLimiterOptions<T> {
   /** Rules enforced on every checked item; must be non-empty. */
   rules: Array<BucketRule<T>>;
   /** Time source; defaults to `Date.now`. */
-  clock?: Clock;
+  clock?: () => number;
   /** Observability sink; receives a `check` event per checked item (optional). */
   events?: Emitter;
 }
@@ -76,7 +76,7 @@ export interface SlidingWindowLimiterOptions<T> {
 export class SlidingWindowLimiter<T> {
   private readonly store: Store;
   private readonly rules: Array<BucketRule<T>>;
-  private readonly clock: Clock;
+  private readonly clock: () => number;
   private readonly events?: Emitter;
 
   /**
@@ -96,7 +96,7 @@ export class SlidingWindowLimiter<T> {
     }
     this.store = options.store;
     this.rules = options.rules;
-    this.clock = options.clock ?? { now: Date.now };
+    this.clock = options.clock ?? Date.now;
     this.events = options.events;
   }
 
@@ -150,7 +150,7 @@ export class SlidingWindowLimiter<T> {
   }
 
   private async checkBucket(bucket: string, rule: RateLimitRule): Promise<RateLimitResult> {
-    const now = this.clock.now();
+    const now = this.clock();
     const { index, reset } = this.windowInfo(now, rule.windowMs);
 
     const res: IncrementResult = await this.store.increment(bucket, rule.windowMs, index);
