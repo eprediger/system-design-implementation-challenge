@@ -42,11 +42,31 @@
 ## 2. Architecture
 
 ```
-Hit → Consumer middleware → SlidingWindowLimiter.check(hit) → Response
-                                        │
-                     per rule: bucketOf(item) → bucket counter
-                                        │
+Hit ──► consumer middleware (demo)
+            │
+            │  rules: bucketOf(item) → bucket id
+            ▼
+    SlidingWindowLimiter.check
+            │
+            ▼
+       Store port
+            │
+            ▼
+   FailOpenStore  (circuit: closed → open → half-open)
+     ├──────────────┐
+     ▼              ▼
+ Redis store   Memory store
+ (primary)     (fallback)
+            │
+            ▼
+    RateLimitResult ──► consumer renders X-RateLimit-* / 429 / Retry-After + JSON
 ```
+
+Counters live in a `Store` (Redis primary / memory fallback); the circuit and its
+on-failure fallback sit in `FailOpenStore`. HTTP rendering is the consumer's job:
+`check` returns a `RateLimitResult`, it never emits a Response (§7). Without
+`REDIS_URL` the consumer targets a bare `MemoryStore` directly (no fail-open
+wrapper).
 
 ### Component map
 
