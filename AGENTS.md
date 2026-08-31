@@ -27,7 +27,7 @@ Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; the
 - BDD/TDD: tests written first (red), implementation second (green), given/when/then in `describe`/`it`. Spec acceptance criteria map directly to test cases.
 - Docs are kept in sync with the code increment-by-increment: any change to the public API or architecture updates `DESIGN.md` / root `README.md` / this file in the same pass. No end-of-work documentation batch.
 - Tests are co-located: `*.test.ts` sits beside the module it tests under `src/` (jest `roots` = `src/`); the build excludes test files.
-- Architecture policy (target): Hexagonal Architecture + DDD — domain core isolated from infrastructure, ports & adapters, framework-agnostic HTTP middleware. Current code does not fully conform yet; convergence is a deferred refactor, a separate task from feature work (don't restructure mid-feature).
+- Architecture: ports & adapters — the domain core is free of infrastructure imports (it depends only on its own ports), adapters implement those ports, and HTTP/middleware lives in the consumer (`demo/`), not the lib. The port boundary is the standard, not a staging post: there is no planned convergence refactor. Tactical DDD patterns (value objects, domain vocabulary like `BucketRule`/`RateLimitResult`) are used where they pay off, but DDD-strict aggregates/use-case ceremony is out of scope for this single-use-case library.
 - Strict TS, CommonJS. Keep code minimal; mark deliberate corner-cuts with a `ponytail:` comment.
 
 ## Structure
