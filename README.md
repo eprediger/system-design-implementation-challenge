@@ -145,7 +145,7 @@ curl -i -H 'X-Forwarded-For: 1.2.3.4' http://localhost:3000/api/route
 
 ## Metrics & logs (demo)
 
-The demo runs US-7 observability on top of the library's `Emitter` event port
+The demo runs [(US-7)](rate-limiter/specs/US-7-observability/spec.md) observability on top of the library's `Emitter` event port
 (the library itself only emits; it takes no logging or metrics dependency).
 Wire the same `Emitter` into the limiter and fail-open store to attach your own
 mechanisms.
