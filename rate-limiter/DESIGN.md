@@ -269,9 +269,21 @@ because sliding window never needs unconditional sets.
 ## 6. Fail-Open Store (Embedded Circuit State)
 
 ```
-CLOSED (healthy) --N failures--> OPEN (fallback) --timeout--> HALF_OPEN (test) --M successes--> CLOSED
-      ^                                                                                 │
-      └──────────────────────────── failure reopens → ──────────────────────────────────┘
+   ┌──────────┐  ◄──────────────────────────────┐
+   │  CLOSED  │                                 │ M successes
+   └────┬─────┘                                 │
+        │  N failures                           │
+        ▼                                       │
+   ┌──────────┐    ┌─────────────────────┐      │
+   │   OPEN   │◄───┤ failure reopens     │      │
+   │(fallback)│    └─────────────────────┘      │
+   └────┬─────┘                                 │
+        │  cooldown (recoveryTimeoutMs)         │
+        ▼                                       │
+   ┌────────────┐                               │
+   │  HALF_OPEN │______________________________┘
+   │   (probe)  │
+   └────────────┘
 ```
 
 The circuit state machine lives **inside** `FailOpenStore`
