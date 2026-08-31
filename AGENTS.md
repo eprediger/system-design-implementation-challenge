@@ -36,11 +36,10 @@ Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; the
 - `src/domain/rate-limit-result.ts` — the `RateLimitResult` value object and its ruling comparison (`isMoreRestrictiveThan`).
 - `src/domain/ports.ts` — driven ports (`Store`, `Clock`, `IncrementResult`). Domain owns its ports; adapters import them.
 - `src/adapter/` — `memory-store.ts` (in-memory `Store` impl), `circuit-breaker.ts`, `fail-open-store.ts` (`Store` that serves from memory with a WARN when the primary is down or the circuit is open).
+- `src/domain/events.ts` — observability port (`Emitter` + `LimiterEvent` union: `check`, `breakerOpened`, `breakerClosed`, `storeFallback`). The library only emits; logging/metrics mechanisms live with the consumer.
 - `src/index.ts` — composition root re-exporting the public API.
-- `REVIEW.md` — committed review checklist (adversarial mandates + human-review
-  sign-off). After feature increments, run a fresh-context red-team against it
-  and fix confirmed findings in a dedicated pass; do-not-edit while reviewing.
-- `demo/` (outside the lib) — reference HTTP consumer: consumes the packed `rate-limiter` tarball by package name; `createApp(rules, storeFactory?)` builds the limiter, middleware calls `check(req)` and renders headers/429; `stress.test.ts` (two instances sharing one Redis → global ceiling) and `failover.test.ts` (in-test TCP relay in front of Redis → outage keeps serving, recovery re-seats) are Redis-gated suites.
+- `REVIEW.md` — committed review checklist (adversarial mandates + human-review sign-off). After feature increments, run a fresh-context red-team against it and fix confirmed findings in a dedicated pass; do-not-edit while reviewing.
+- `demo/` (outside the lib) — reference HTTP consumer: consumes the packed `rate-limiter` tarball by package name; `createApp(rules, storeFactory?, logger?)` builds the limiter, middleware calls `check(req)` and renders headers/429; pino + prom-client observability (`logger.ts`, `metrics.ts`, `wide-event.ts` — one wide log line per request, `/metrics` route, `LOG_LEVEL` filter); `stress.test.ts` (two instances sharing one Redis → global ceiling) and `failover.test.ts` (in-test TCP relay in front of Redis → outage keeps serving, recovery re-seats) are Redis-gated suites.
 
 ## Locked-in decisions (do not reinvent)
 
@@ -49,7 +48,7 @@ Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; the
 - Circuit breaker closed → open → half-open; fail-open (serve, don't block) on Redis failure, wired via `FailOpenStore` (`adapter/fail-open-store.ts`).
 - Rules: consumer-declared `BucketRule[]` — each pairs a `RateLimitRule` with a `bucketOf(item)` closure; the limiter calls `bucketOf` internally (per rule) and returns one ruling. No descriptor/extractor registry (a rule and its bucket derivation are one object), no schema-validation lib (TS types cover config; Express parses request fields).
 - `DESIGN.md` is a living WIP — update it as decisions are made.
-- Metrics (`/metrics`, prom-client) is deferred, on the roadmap; implement only if time permits.
+- Observability: the lib exposes only the `Emitter` event port (no logging/metrics of its own, ioredis-only deps). pino + prom-client live in `demo/` as the consumer mechanisms: wide events (one log line per request), `/metrics`, `LOG_LEVEL`. Prometheus scrape/Grafana are downstream homework, not in-repo.
 
 ## Submission rules (must honor)
 
@@ -58,3 +57,17 @@ Same scripts work on native Node >= 18: `npm run typecheck` (`tsc --noEmit`; the
 - Required deliverable: `DESIGN.md` explaining architecture, trade-offs, and AI usage.
 - Correct code that builds and passes tests is mandatory — non-compiling/test-failing code won't be reviewed.
 - Avoid overengineering and AI slop; keep unknown code minimal.
+
+## Critical gotchas (easy to miss)
+
+- **Demo consumes a tarball, not a local path:** The `demo/package.json` dependency is `file:../rate-limiter/rate-limiter-1.0.0.tgz`. After any lib change, you must re-pack and reinstall: run `npm run demo:install` from `demo/` (it packs the lib, then `npm ci` in demo).
+- **Integration tests need `--network host`** when running from the dev container so `127.0.0.1:6379` reaches the host's compose Redis. Without it, Redis-backed tests are silently skipped.
+- **Tests run serially** (`jest --runInBand`). No parallel execution.
+- **No lint script** — only `typecheck` and `test`. Don't look for `npm run lint`.
+- **Specs are directories, not files:** `rate-limiter/specs/US-<number>-<name>/spec.md`. Never edit spec files — they're challenge-owned.
+- **Jest global setup** (`jest/global-setup.ts`) checks Redis availability and sets a global flag; Redis-dependent tests skip if unavailable.
+- **Build cleans `dist/` first** (`rmSync('dist', {recursive:true,force:true})` in `package.json` "build" script).
+- **Demo runs on port 3000** by default (`PORT` env var overrides). `npm start` in demo serves HTTP.
+- **`trust proxy` is `'loopback'` by default** — only loopback clients can set `X-Forwarded-For`. Set `TRUST_PROXY=true` for real proxies.
+- **Circuit breaker + fail-open store share the same `Emitter`** — wire one instance into all three (limiter, breaker, FailOpenStore) for correct event emission.
+- **Ponytail comments** mark deliberate simplifications with known ceilings. Don't "fix" them without understanding the trade-off.

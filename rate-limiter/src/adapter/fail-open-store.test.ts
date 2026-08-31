@@ -1,6 +1,7 @@
 import { FailOpenStore } from './fail-open-store';
 import { CircuitBreaker } from './circuit-breaker';
 import { MemoryStore } from './memory-store';
+import type { LimiterEvent } from '../domain/events';
 import type { Store } from '../domain/ports';
 
 const windowMs = 60_000;
@@ -81,5 +82,25 @@ describe('Given a fail-open store whose primary is down', () => {
 
     // fallback served the two outage hits and nothing since
     await expect(fallback.get('k', windowMs, liveIndex)).resolves.toBe(2);
+  });
+
+  it('emits a storeFallback event per fallback serve with its reason', async () => {
+    const events: LimiterEvent[] = [];
+    const store = new FailOpenStore({
+      primary: failingPrimary(jest.fn().mockRejectedValue(new Error('redis down'))),
+      breaker: new CircuitBreaker({ failureThreshold: 2, recoveryTimeoutMs: 60_000, successThreshold: 1 }),
+      fallback: new MemoryStore(),
+      warn: () => {},
+      events: { emit: (e) => events.push(e) },
+    });
+
+    await store.increment('k', windowMs, liveIndex); // failure 1 → error serve
+    await store.increment('k', windowMs, liveIndex); // failure 2 → trips → error serve
+    await store.increment('k', windowMs, liveIndex); // OPEN: fallback serve, reason 'open'
+    expect(events).toEqual([
+      { type: 'storeFallback', key: 'k', fallbackType: 'memory', reason: 'error', lastError: expect.any(Error) },
+      { type: 'storeFallback', key: 'k', fallbackType: 'memory', reason: 'error', lastError: expect.any(Error) },
+      { type: 'storeFallback', key: 'k', fallbackType: 'memory', reason: 'open', lastError: undefined },
+    ]);
   });
 });

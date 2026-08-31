@@ -3,6 +3,7 @@ import {
   SlidingWindowLimiter,
   type RateLimitRule,
 } from './sliding-window';
+import type { LimiterEvent } from './events';
 import type { Store } from './ports';
 import { MemoryStore } from '../adapter/memory-store';
 
@@ -230,6 +231,47 @@ describe('Given a sliding window rate limit rule', () => {
         rules: [{ bucketOf: () => 'key', rule }],
       });
       await expect(failingLimiter.check({})).rejects.toThrow('boom');
+    });
+  });
+
+  describe('When wired to an event sink', () => {
+    it('emits a check event with the ruling bucket, rule, and budget', async () => {
+      const events: LimiterEvent[] = [];
+      const limiter = new SlidingWindowLimiter<unknown>({
+        store,
+        clock: { now: () => now },
+        rules: [
+          { bucketOf: () => 'global', rule: { windowMs, maxRequests: 5 } },
+          { bucketOf: () => 'ip', rule: { windowMs, maxRequests: 2 } },
+        ],
+        events: { emit: (e) => events.push(e) },
+      });
+
+      await limiter.check({});
+      await limiter.check({});
+      const third = await limiter.check({});
+      expect(third.allowed).toBe(false);
+
+      expect(events).toHaveLength(3);
+      // The tighter per-IP rule (limit 2) rules over the global rule.
+      expect(events[0]).toEqual({
+        type: 'check',
+        bucket: 'ip',
+        ruleIndex: 1,
+        allowed: true,
+        limit: 2,
+        remaining: 1,
+        reset: 60,
+      });
+      expect(events[2]).toMatchObject({
+        type: 'check',
+        bucket: 'ip',
+        ruleIndex: 1,
+        allowed: false,
+        limit: 2,
+        remaining: 0,
+        retryAfter: 60,
+      });
     });
   });
 });

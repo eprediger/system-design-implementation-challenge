@@ -9,4 +9,7 @@ RUN npm ci
 
 COPY . .
 
+# Build TypeScript source
+RUN npm run build
+
 CMD ["npm", "test"]

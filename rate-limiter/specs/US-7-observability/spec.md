@@ -24,20 +24,20 @@ As a platform engineer, I want to see metrics and logs for rate limiter activity
 - Requests throttled
 - Errors by type
 
-### Histograms
+### Latency Metrics (Summaries)
 
-- Algorithm check latency (p50, p95, p99)
-- Store operation latency (p50, p95, p99)
+- Algorithm check latency (p50, p95, p99) — client-side summaries
+- Store operation latency (p50, p95, p99) — client-side summaries
 
 ## Log Events
 
-| Event | Level | Context Required |
-|-------|-------|------------------|
-| Request throttled | warn | key, rule, retryAfter, ip, userId |
-| Store fallback | warn | key, error, fallbackType |
-| Circuit breaker opened | warn | failureCount, lastError |
-| Circuit breaker closed | info | successCount |
-| Algorithm error | error | key, error, stack |
+| Event                  | Level | Context Required                                                                                                                                                                                                                                                                                       |
+| ---------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Request throttled      | warn  | key, rule, retryAfter, ip, userId                                                                                                                                                                                                                                                                      |
+| Store fallback         | warn  | key, error, fallbackType (emitted **once per outage trip**, not per-serve; fallback details fold into the request's wide event at `store.served_from`/`store.reason`. A single WARN per real trip is retained; subsequent serves during the same outage add no new log lines, preventing a log storm.) |
+| Circuit breaker opened | warn  | failureCount, lastError                                                                                                                                                                                                                                                                                |
+| Circuit breaker closed | info  | successCount                                                                                                                                                                                                                                                                                           |
+| Store error            | error | key, error, stack                                                                                                                                                                                                                                                                                      |
 
 ## Logging Format
 

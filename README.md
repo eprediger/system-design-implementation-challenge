@@ -94,7 +94,7 @@ From `demo/`:
 
 ```sh
 npm run demo:install   # npm pack the lib → rate-limiter-1.0.0.tgz → npm ci here
-npm test               # supertest suites (server, distributed stress, failover)
+npm test               # supertest suites (server, observability, distributed stress, failover)
 npm start              # listens on $PORT (default 3000)
 ```
 
@@ -142,6 +142,29 @@ slashes collapsed) so spelling variants share one counter. Try it:
 curl -i -H 'X-Forwarded-For: 1.2.3.4' http://localhost:3000/api/route
 ```
 
+## Metrics & logs (demo)
+
+The demo runs US-7 observability on top of the library's `Emitter` event port
+(the library itself only emits; it takes no logging or metrics dependency).
+Wire the same `Emitter` into the limiter, circuit breaker, and fail-open store
+to attach your own mechanisms.
+
+- **Logs** — one *wide event* per request, written once as the response
+  finishes ([structured JSON](https://github.com/pinojs/pino), ISO timestamp):
+  an allowed request logs `info`, a throttled one `warn` (with
+  `rate_limit.bucket/rule/allowed/retry_after` plus `ip`, `request_id`,
+  `user_id`), and an unhandled error `error` with `error.stack`. Circuit-breaker
+  open/close stay separate lifecycle lines. Filter with `LOG_LEVEL` (default
+  `info`, e.g. `LOG_LEVEL=warn`).
+- **Metrics** — `GET /metrics` exposes a Prometheus scrape ([prom-client](https://prometheus.io/docs/guides/nodejs/)):
+  counters `rate_limit_requests_total`, `rate_limit_allowed_total`,
+  `rate_limit_throttled_total`, `rate_limit_errors_total{type}`, `rate_limit_fallback_total{reason}`,
+  `rate_limit_breaker_opened_total`; and p50/p95/p99 summaries
+  `rate_limit_check_ms` (algorithm check) and `rate_limit_store_op_ms{operation}`.
+- `store_op_ms` comes from a `timedStore` decorator wrapping the store; the
+  fallback path is counted per serve (`reason="error"|"open"`) yet logged once
+  per real trip, so an outage flags on the wide event without a log storm.
+
 ## Layout
 
 ```
@@ -149,11 +172,13 @@ src/
   domain/sliding-window.ts   # core algorithm + rule vocabulary
   domain/rate-limit-result.ts # RateLimitResult value object
   domain/ports.ts            # Store / Clock / IncrementResult ports
+  domain/events.ts           # Emitter observability port (+ LimiterEvent union)
   domain/*.test.ts           # co-located tests
   adapter/                   # ports' implementations (memory store, circuit breaker, fail-open store)
   index.ts                   # composition root (public API)
 demo/src/
   server.ts                  # HTTP consumer (createApp with per-IP / per-endpoint rules)
+  logger.ts / metrics.ts / wide-event.ts   # pino + prom-client observability
   stress.test.ts / failover.test.ts   # Redis-gated stress + failover suites
 ```
 

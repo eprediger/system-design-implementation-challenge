@@ -9,6 +9,7 @@ export type {
   SlidingWindowLimiterOptions,
 } from './domain/sliding-window';
 export type { Clock, IncrementResult, Store } from './domain/ports';
+export type { Emitter, LimiterEvent } from './domain/events';
 export { CircuitBreaker, CircuitOpenError } from './adapter/circuit-breaker';
 export type { CircuitBreakerOptions, CircuitState } from './adapter/circuit-breaker';
 export { MemoryStore } from './adapter/memory-store';

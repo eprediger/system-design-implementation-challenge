@@ -11,5 +11,39 @@ services:
       timeout: 3s
       retries: 5
 
+  demo:
+    image: node:24-slim
+    working_dir: /app
+    volumes:
+      - ./demo:/app:ro
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis://host.docker.internal:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus:/etc/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    depends_on:
+      - demo
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+
 volumes:
   rl-redis:

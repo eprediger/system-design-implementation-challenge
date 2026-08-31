@@ -1,3 +1,5 @@
+import type { Emitter } from '../domain/events';
+
 /**
  * Circuit breaker lifecycle:
  *
@@ -30,6 +32,8 @@ export interface CircuitBreakerOptions {
   successThreshold: number;
   /** Time source; injectable for deterministic tests. */
   now?: () => number;
+  /** Observability sink; receives `breakerOpened` / `breakerClosed` (optional). */
+  events?: Emitter;
 }
 
 /**
@@ -47,7 +51,8 @@ export class CircuitBreaker {
   private openedAt = 0;
   private probing = false;
   private readonly now: () => number;
-  private readonly cfg: Required<CircuitBreakerOptions>;
+  private readonly cfg: Omit<Required<CircuitBreakerOptions>, 'events'>;
+  private readonly events?: Emitter;
 
   /**
    * @param cfg - Thresholds and cooldown for the state transitions.
@@ -57,16 +62,23 @@ export class CircuitBreaker {
     if (cfg.failureThreshold < 1 || cfg.successThreshold < 1 || cfg.recoveryTimeoutMs < 0) {
       throw new Error('failureThreshold, successThreshold must be >= 1; recoveryTimeoutMs >= 0');
     }
-    this.cfg = { ...cfg, now: cfg.now ?? Date.now };
+    this.cfg = {
+      failureThreshold: cfg.failureThreshold,
+      recoveryTimeoutMs: cfg.recoveryTimeoutMs,
+      successThreshold: cfg.successThreshold,
+      now: cfg.now ?? Date.now,
+    };
     this.now = this.cfg.now;
+    this.events = cfg.events;
   }
 
-  private transitionToOpen(): void {
+  private transitionToOpen(failureCount: number, lastError?: Error): void {
     this.state = 'OPEN';
     this.openedAt = this.now();
     this.failures = 0;
     this.successes = 0;
     this.probing = false;
+    this.events?.emit({ type: 'breakerOpened', failureCount, lastError });
   }
 
   /**
@@ -100,6 +112,7 @@ export class CircuitBreaker {
         this.successes++;
         if (this.successes >= this.cfg.successThreshold) {
           this.state = 'CLOSED';
+          this.events?.emit({ type: 'breakerClosed', successCount: this.successes });
           this.successes = 0;
         }
         this.probing = false;
@@ -112,11 +125,11 @@ export class CircuitBreaker {
       // from CLOSED: swallowing it keeps `openedAt` un-re-armed, so a slow
       // in-flight failure cannot extend the cooldown.
       if (this.state === 'HALF_OPEN') {
-        this.transitionToOpen();
+        this.transitionToOpen(1, err as Error);
       } else if (this.state === 'CLOSED') {
         this.failures++;
         if (this.failures >= this.cfg.failureThreshold) {
-          this.transitionToOpen();
+          this.transitionToOpen(this.failures, err as Error);
         }
       }
       throw err;

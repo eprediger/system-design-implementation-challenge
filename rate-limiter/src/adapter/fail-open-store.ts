@@ -1,3 +1,4 @@
+import type { Emitter } from '../domain/events';
 import type { IncrementResult, Store } from '../domain/ports';
 import { CircuitOpenError } from './circuit-breaker';
 import type { CircuitBreaker } from './circuit-breaker';
@@ -12,6 +13,8 @@ export interface FailOpenStoreOptions {
   fallback: Store;
   /** Sink for the WARN line emitted on a real primary failure; defaults to `console.warn`. */
   warn?: (message: string) => void;
+  /** Observability sink; receives a `storeFallback` event per fallback serve (optional). */
+  events?: Emitter;
 }
 
 /**
@@ -29,24 +32,30 @@ export class FailOpenStore implements Store {
   private readonly breaker: CircuitBreaker;
   private readonly fallback: Store;
   private readonly warn: (message: string) => void;
+  private readonly events?: Emitter;
 
   constructor(opts: FailOpenStoreOptions) {
     this.primary = opts.primary;
     this.breaker = opts.breaker;
     this.fallback = opts.fallback;
     this.warn = opts.warn ?? ((message) => console.warn(message));
+    this.events = opts.events;
   }
 
   private async guard<T>(
+    key: string,
     run: (s: Store) => Promise<T>,
     fallbackRun: (s: Store) => Promise<T>,
   ): Promise<T> {
     try {
       return await this.breaker.exec(() => run(this.primary));
     } catch (err) {
-      if (!(err instanceof CircuitOpenError)) {
+      const reason = err instanceof CircuitOpenError ? 'open' : 'error';
+      if (reason === 'error') {
         this.warn('rate-limiter fail-open: primary store unavailable, serving from memory');
       }
+      const lastError = err instanceof Error ? err : new Error(String(err));
+      this.events?.emit({ type: 'storeFallback', key, fallbackType: 'memory', reason, lastError: reason === 'error' ? lastError : undefined });
       return fallbackRun(this.fallback);
     }
   }
@@ -54,6 +63,7 @@ export class FailOpenStore implements Store {
   /** See {@link Store.increment}. */
   increment(key: string, windowMs: number, windowIndex: number): Promise<IncrementResult> {
     return this.guard(
+      key,
       (s) => s.increment(key, windowMs, windowIndex),
       (s) => s.increment(key, windowMs, windowIndex),
     );
@@ -62,6 +72,7 @@ export class FailOpenStore implements Store {
   /** See {@link Store.get}. */
   get(key: string, windowMs: number, windowIndex: number): Promise<number> {
     return this.guard(
+      key,
       (s) => s.get(key, windowMs, windowIndex),
       (s) => s.get(key, windowMs, windowIndex),
     );
@@ -70,6 +81,7 @@ export class FailOpenStore implements Store {
   /** See {@link Store.reset}. */
   reset(key: string): Promise<void> {
     return this.guard(
+      key,
       (s) => s.reset(key),
       (s) => s.reset(key),
     );
@@ -78,6 +90,7 @@ export class FailOpenStore implements Store {
   /** See {@link Store.ping}. Falls back to the fallback store's answer. */
   ping(): Promise<boolean> {
     return this.guard(
+      'ping',
       (s) => s.ping(),
       (s) => s.ping(),
     );

@@ -1,4 +1,5 @@
 import { RateLimitResult } from './rate-limit-result';
+import type { Emitter } from './events';
 import type { Clock, IncrementResult, Store } from './ports';
 
 /**
@@ -52,6 +53,8 @@ export interface SlidingWindowLimiterOptions<T> {
   rules: Array<BucketRule<T>>;
   /** Time source; defaults to `Date.now`. */
   clock?: Clock;
+  /** Observability sink; receives a `check` event per checked item (optional). */
+  events?: Emitter;
 }
 
 /**
@@ -74,6 +77,7 @@ export class SlidingWindowLimiter<T> {
   private readonly store: Store;
   private readonly rules: Array<BucketRule<T>>;
   private readonly clock: Clock;
+  private readonly events?: Emitter;
 
   /**
    * @throws {RateLimiterConfigurationError} - when no rules are configured.
@@ -93,6 +97,7 @@ export class SlidingWindowLimiter<T> {
     this.store = options.store;
     this.rules = options.rules;
     this.clock = options.clock ?? { now: Date.now };
+    this.events = options.events;
   }
 
   /**
@@ -119,13 +124,28 @@ export class SlidingWindowLimiter<T> {
    */
   async check(item: T): Promise<RateLimitResult> {
     const [first, ...rest] = this.rules;
-    let ruling = await this.checkBucket(first.bucketOf(item), first.rule);
-    for (const { bucketOf, rule } of rest) {
-      const result = await this.checkBucket(bucketOf(item), rule);
+    let rulingBucket = first.bucketOf(item);
+    let rulingIndex = 0;
+    let ruling = await this.checkBucket(rulingBucket, first.rule);
+    for (const [index, { bucketOf, rule }] of rest.entries()) {
+      const bucket = bucketOf(item);
+      const result = await this.checkBucket(bucket, rule);
       if (result.isMoreRestrictiveThan(ruling)) {
         ruling = result;
+        rulingBucket = bucket;
+        rulingIndex = index + 1;
       }
     }
+    this.events?.emit({
+      type: 'check',
+      bucket: rulingBucket,
+      ruleIndex: rulingIndex,
+      allowed: ruling.allowed,
+      limit: ruling.limit,
+      remaining: ruling.remaining,
+      reset: ruling.reset,
+      retryAfter: ruling.retryAfter,
+    });
     return ruling;
   }
 

@@ -1,4 +1,5 @@
 import { CircuitBreaker } from './circuit-breaker';
+import type { LimiterEvent } from '../domain/events';
 
 function ok<T>(v: T): () => Promise<T> {
   return () => Promise.resolve(v);
@@ -168,6 +169,45 @@ describe('Given a circuit breaker', () => {
       clock.now = 1000; // original cooldown elapses
       await expect(breaker.exec(ok('up'))).resolves.toBe('up');
       expect(breaker.state).toBe('CLOSED');
+    });
+  });
+
+  describe('When wired to an event sink', () => {
+    it('emits breakerOpened with the failure count and error when it trips', async () => {
+      const events: LimiterEvent[] = [];
+      const clock = { now: 0 };
+      const breaker = new CircuitBreaker({
+        failureThreshold: 2,
+        recoveryTimeoutMs: 1000,
+        successThreshold: 1,
+        now: () => clock.now,
+        events: { emit: (e) => events.push(e) },
+      });
+      const err = new Error('redis down');
+      await breaker.exec(() => Promise.reject(err)).catch(() => {});
+      await breaker.exec(() => Promise.reject(err)).catch(() => {});
+      expect(breaker.state).toBe('OPEN');
+      expect(events).toContainEqual({ type: 'breakerOpened', failureCount: 2, lastError: err });
+    });
+
+    it('emits breakerClosed with the success count when it recovers', async () => {
+      const events: LimiterEvent[] = [];
+      const clock = { now: 0 };
+      const breaker = new CircuitBreaker({
+        failureThreshold: 1,
+        recoveryTimeoutMs: 100,
+        successThreshold: 2,
+        now: () => clock.now,
+        events: { emit: (e) => events.push(e) },
+      });
+      await breaker.exec(() => Promise.reject(new Error('down'))).catch(() => {});
+      expect(breaker.state).toBe('OPEN');
+
+      clock.now = 200; // cooldown elapsed
+      await breaker.exec(ok('a'));
+      await breaker.exec(ok('b'));
+      expect(breaker.state).toBe('CLOSED');
+      expect(events).toContainEqual({ type: 'breakerClosed', successCount: 2 });
     });
   });
 });
