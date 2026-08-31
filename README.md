@@ -116,7 +116,7 @@ in the fallback during the outage are discarded when Redis re-seats; the shared
 counters resume from Redis's own state (fail-open favors availability over
 state continuity).
 
-The demo also demonstrates fault tolerance (US-5). Without `REDIS_URL` it uses
+The demo also demonstrates fault tolerance [(US-5)](rate-limiter/specs/US-5-fault-tolerance/spec.md). Without `REDIS_URL` it uses
 an in-memory store directly. Set it to run the full stack — Redis first:
 
 ```sh
