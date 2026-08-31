@@ -1,15 +1,15 @@
 /**
  * Observability port: an outbound event stream describing what the library
  * did, without any opinion on how it is stored or rendered. Consumers inject
- * the same {@link Emitter} into the limiter, circuit breaker, and/or fail-open
- * store, then connect it to their own mechanisms (a log per request, a metrics
+ * the same {@link Emitter} into the limiter and/or fail-open store, then
+ * connect it to their own mechanisms (a log per request, a metrics
  * registry, OpenTelemetry, ...).
  */
 export interface Emitter {
   emit(event: LimiterEvent): void;
 }
 
-export type LimiterEvent = CheckEvent | BreakerOpenedEvent | BreakerClosedEvent | StoreFallbackEvent;
+export type LimiterEvent = CheckEvent | StoreFallbackEvent;
 
 /** A completed rate-limit check for one item: the ruling rule's context. */
 export interface CheckEvent {
@@ -25,21 +25,6 @@ export interface CheckEvent {
   reset: number;
   /** Advisory back-off seconds; `undefined` when allowed. */
   retryAfter?: number;
-}
-
-/** The circuit tripped CLOSED → OPEN (or reopened from a failed half-open probe). */
-export interface BreakerOpenedEvent {
-  type: 'breakerOpened';
-  /** Consecutive failures from CLOSED, or the single failing probe, that tripped it. */
-  failureCount: number;
-  /** The failure surfaced on the tripping call, if one was observed. */
-  lastError?: Error;
-}
-
-/** The circuit recovered HALF_OPEN → CLOSED. */
-export interface BreakerClosedEvent {
-  type: 'breakerClosed';
-  successCount: number;
 }
 
 /**

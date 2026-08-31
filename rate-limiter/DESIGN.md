@@ -49,8 +49,6 @@ Hit → Consumer middleware → SlidingWindowLimiter.check(hit) → Response
                                         │
                      per rule: bucketOf(item) → bucket counter
                                         │
-                                  CircuitBreaker
-                                  Redis ⇄ in-memory fallback
 ```
 
 ### Component map
@@ -63,8 +61,7 @@ Hit → Consumer middleware → SlidingWindowLimiter.check(hit) → Response
 | Domain ports      | `domain/ports.ts`                | Driven ports (`Store`, `Clock`, `IncrementResult`) — domain owns them   |
 | Memory store      | `adapter/memory-store.ts`        | In-process fallback (Map + expiry), implements `Store` port             |
 | Redis store       | `adapter/redis.ts`               | Atomic Lua scripts, shared state, implements `Store` port               |
-| Circuit breaker   | `adapter/circuit-breaker.ts`     | Closed/Open/Half-open state machine                                     |
-| Observability port| `domain/events.ts`               | `Emitter` shape + `LimiterEvent` union: `check`, `breakerOpened`, `breakerClosed`, `storeFallback` |
+| Observability port| `domain/events.ts`               | `Emitter` shape + `LimiterEvent` union: `check`, `storeFallback`      |
 
 HTTP handling (deriving `bucketOf` from the request, `trust proxy`, headers,
 429 rendering) lives in the reference consumer `demo/`, outside the library.
@@ -78,8 +75,6 @@ that reports what it did:
 | Event            | On                                              | Carries                                   |
 | ---------------- | ----------------------------------------------- | ----------------------------------------- |
 | `check`          | every rate-limit check                          | ruling bucket, rule index, allowed, limit, remaining, reset, retryAfter |
-| `breakerOpened`  | CLOSED → OPEN                                   | consecutive failure count, last error     |
-| `breakerClosed`  | HALF_OPEN → CLOSED                              | recovery success count                    |
 | `storeFallback`  | every fallback serve (Redis down / circuit open)| bucket key, fallback kind, reason, lastError on a real primary failure |
 
 Consumers inject the **same** `Emitter` into the limiter, circuit breaker, and
@@ -288,9 +283,7 @@ state continuity.
 US-5's "logged, and metrics are updated" acceptance criterion is fully met:
 real primary failures WARN once (per request via the built-in `warn` hook, or
 per event via the demo's emitter), and the demo counters every fallback
-(`rate_limit_fallback_total{reason=...}`) and breaker trip
-(`rate_limit_breaker_opened_total`), plus the wide event's `store` field —
-without turning an outage into a per-request log storm.
+(`rate_limit_fallback_total{reason=...}`) without turning an outage into a per-request log storm.
 
 ---
 
@@ -360,7 +353,6 @@ its subject (`*.test.ts` next to the module it tests).
 | rate-limit-result | `src/domain/rate-limit-result.test.ts` | the "most restrictive wins" ruling comparison in isolation (deny beats allow, lowest remaining, smallest denied limit, tie) |
 | memory store    | `src/adapter/memory-store.test.ts`    | unit                                                                                                                                                                       |
 | redis store     | `src/adapter/redis.test.ts`           | integration, skips if unavailable; reconnect-on-demand after a lost connection (in-test TCP relay), concurrent reconnect, 100 concurrent increments, exact reset with delimiter/glob ids, `commandTimeout` on a silent socket |
-| circuit-breaker | `src/adapter/circuit-breaker.test.ts` | all state transitions, single in-flight probe, `recoveryTimeoutMs: 0`, straggler failure does not re-arm the cooldown, `breakerOpened`/`breakerClosed` events |
 | concurrency     | `src/domain/concurrency.test.ts`      | 100 concurrent / limit 50 → exactly 50 allowed                                                                                                                             |
 | fail-open store | `src/adapter/fail-open-store.test.ts` | fallback + WARN on primary failure, OPEN skips the primary, half-open recovery re-uses it, `storeFallback` per serve with reason |
 | event sink      | `src/domain/sliding-window.test.ts` (event describe block) | ruling `check` event carries bucket/ruleIndex/limit/remaining/reset/retryAfter |
@@ -398,15 +390,15 @@ Legend: **✔** covered by an automated test in the CI gate · **◐** partially
 | US-4 | O(1) time and memory per key | by construction (§ 3: counter, one `EVAL`) — not a timed proof | ✔ |
 | US-4 | connection pooling | one persistent ioredis connection per store, no per-request churn (intent met; no min/max sizing) | ✔ |
 | US-5 | unreachable Redis → in-memory fallback | `fail-open-store.test.ts`; failover phase B | ✔ |
-| US-5 | N consecutive failures → breaker OPEN, skip Redis | `circuit-breaker.test.ts` all transitions; failover phase B asserts `OPEN` | ✔ |
-| US-5 | recovery → breaker closes, Redis re-used | `circuit-breaker.test.ts` half-open; failover phase C; `redis.test.ts` reconnect-on-demand | ✔ |
-| US-5 | failure logged **and metrics updated** | WARN via the `warn()` hook + demo emitter; `rate_limit_fallback_total`/`rate_limit_breaker_opened_total` asserted in `demo/src/wide-event.test.ts` | ✔ |
+| US-5 | N consecutive failures → OPEN, skip Redis | failover phase B asserts `OPEN` | ✔ |
+| US-5 | recovery → closed, Redis re-used | failover phase C; `redis.test.ts` reconnect-on-demand | ✔ |
+| US-5 | failure logged **and metrics updated** | WARN via the `warn()` hook + demo emitter; `rate_limit_fallback_total` asserted in `demo/src/wide-event.test.ts` | ✔ |
 | US-6 | throttled → 429 | `server.test.ts` | ✔ |
 | US-6 | `Retry-After` + `X-RateLimit-*` on 429, and on allowed | `server.test.ts` (headers asserted on both paths) | ✔ |
 | US-6 | throttled → JSON error body | `server.test.ts` `toMatchObject` | ✔ |
 | US-6 | fail-open still sets headers | § 7 behavior; failover phase B asserts the `X-RateLimit-*` trio on the fallback path | ✔ |
 | US-7 | metrics counters + latency histograms | `demo/src/metrics.test.ts` (counters, allowed/throttled, p50/p95/p99 `check_ms` + `store_op_ms`, 100-request snapshot, /metrics route) | ✔ |
-| US-7 | structured logs (throttled, fallback, breaker, errors) | `demo/src/wide-event.test.ts` throttled warn event; store-failure error event with stack; breaker lifecycle line; fallback folded into wide event without a log storm | ✔ |
+| US-7 | structured logs (throttled, fallback, errors) | `demo/src/wide-event.test.ts` throttled warn event; store-failure error event with stack; fallback folded into wide event without a log storm | ✔ |
 | US-8 | 100 concurrent / limit 50 → exactly 50 allowed | `src/domain/concurrency.test.ts` | ✔ |
 | US-8 | window-boundary counts accurate | `sliding-window.test.ts` boundary/transition | ✔ |
 | US-8 | token bucket burst consumed correctly | — | ✦ token bucket not implemented (locked decision, § 3/§ 9) |

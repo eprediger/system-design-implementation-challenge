@@ -8,7 +8,6 @@ export interface DemoMetrics {
   throttledTotal: Counter<string>;
   errorsTotal: Counter<string>;
   fallbackTotal: Counter<string>;
-  breakerOpenedTotal: Counter<string>;
   checkMs: Summary<string>;
   storeOpMs: Summary<string>;
 }
@@ -26,7 +25,6 @@ export function createMetrics(): DemoMetrics {
     throttledTotal: counter('rate_limit_throttled_total', 'Requests throttled', ['rule']),
     errorsTotal: counter('rate_limit_errors_total', 'Errors by type', ['type']),
     fallbackTotal: counter('rate_limit_fallback_total', 'Store fallback serves', ['reason']),
-    breakerOpenedTotal: counter('rate_limit_breaker_opened_total', 'Circuit breaker trips'),
     checkMs: summary('rate_limit_check_ms', 'Algorithm check latency (ms)'),
     storeOpMs: summary('rate_limit_store_op_ms', 'Store operation latency (ms)', ['operation']),
   };

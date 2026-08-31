@@ -67,12 +67,10 @@ export class FailOpenStore implements Store {
     this.failures = 0;
     this.successes = 0;
     this.probing = false;
-    // Removed breakerOpened emission - FailOpenStore uses storeFallback events instead
   }
 
   private transitionToClosed(successCount: number): void {
     this.state = 'CLOSED';
-    this.events?.emit({ type: 'breakerClosed', successCount });
     this.successes = 0;
   }
 

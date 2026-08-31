@@ -159,7 +159,6 @@ to attach your own mechanisms.
 - **Metrics** — `GET /metrics` exposes a Prometheus scrape ([prom-client](https://prometheus.io/docs/guides/nodejs/)):
   counters `rate_limit_requests_total`, `rate_limit_allowed_total`,
   `rate_limit_throttled_total`, `rate_limit_errors_total{type}`, `rate_limit_fallback_total{reason}`,
-  `rate_limit_breaker_opened_total`; and p50/p95/p99 summaries
   `rate_limit_check_ms` (algorithm check) and `rate_limit_store_op_ms{operation}`.
 - `store_op_ms` comes from a `timedStore` decorator wrapping the store; the
   fallback path is counted per serve (`reason="error"|"open"`) yet logged once

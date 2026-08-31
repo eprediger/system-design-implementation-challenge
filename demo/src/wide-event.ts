@@ -80,16 +80,6 @@ export function createEmitter(
           }
           break;
         }
-        case 'breakerOpened':
-          metrics.breakerOpenedTotal.inc();
-          logger.warn(
-            { breaker: 'open', failure_count: event.failureCount, last_error: event.lastError?.message },
-            'circuit breaker opened',
-          );
-          break;
-        case 'breakerClosed':
-          logger.info({ breaker: 'closed', success_count: event.successCount }, 'circuit breaker closed');
-          break;
       }
     },
   };
