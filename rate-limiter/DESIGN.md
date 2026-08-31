@@ -8,7 +8,8 @@
 - **Language/stack:** TypeScript on Node.js, ioredis, Jest
 - **Algorithm:** Sliding window counter (O(1) time/space per key)
 - **Storage:** `Store` interface — Redis-backed (atomic Lua) with in-memory fallback
-- **Resilience:** Circuit breaker (closed → open → half-open), fail-open
+- **Resilience:** fail-open — the circuit (closed → open → half-open) is
+  embedded in `FailOpenStore`
 - **Rules:** Global, per-IP, per-endpoint `pathPattern` — no extractor/plugin system
 
 ---
@@ -35,10 +36,6 @@
   their own mechanisms. The reference demo attaches pino + prom-client (wide
   events, §8).
 - **(Roadmap)** Grafana dashboard on top of the demo metrics
-- **Observability mechanisms** — the library ships an optional `Emitter` event
-  port (`domain/events.ts`) and no logging/metrics of its own; consumers attach
-  their own mechanisms. The reference demo attaches pino + prom-client (wide
-  events, §8).
 
 ---
 
@@ -58,7 +55,7 @@ Hit → Consumer middleware → SlidingWindowLimiter.check(hit) → Response
 | Rules             | consumer-declared `BucketRule[]` | `bucketOf(item)` + `RateLimitRule` per counter bucket                   |
 | Rate limiter core | `domain/sliding-window.ts`       | Algorithm + domain types + `BucketRule` / `SlidingWindowLimiterOptions` |
 | Rate limit result | `domain/rate-limit-result.ts`    | `RateLimitResult` value object + most-restrictive ruling comparison     |
-| Domain ports      | `domain/ports.ts`                | Driven ports (`Store`, `Clock`, `IncrementResult`) — domain owns them   |
+| Domain ports      | `domain/ports.ts`                | Driven ports (`Store`, `IncrementResult`) — domain owns them   |
 | Memory store      | `adapter/memory-store.ts`        | In-process fallback (Map + expiry), implements `Store` port             |
 | Redis store       | `adapter/redis.ts`               | Atomic Lua scripts, shared state, implements `Store` port               |
 | Observability port| `domain/events.ts`               | `Emitter` shape + `LimiterEvent` union: `check`, `storeFallback`      |
@@ -77,8 +74,8 @@ that reports what it did:
 | `check`          | every rate-limit check                          | ruling bucket, rule index, allowed, limit, remaining, reset, retryAfter |
 | `storeFallback`  | every fallback serve (Redis down / circuit open)| bucket key, fallback kind, reason, lastError on a real primary failure |
 
-Consumers inject the **same** `Emitter` into the limiter, circuit breaker, and
-`FailOpenStore` and attach their own mechanisms; the demo attaches
+Consumers inject the **same** `Emitter` into the limiter and `FailOpenStore` and
+attach their own mechanisms; the demo attaches
 [pino](https://getpino.io) + [prom-client](https://prometheus.io/docs/guides/nodejs/).
 
 The demo's style is **wide events** (one context-rich log line per request,
@@ -88,8 +85,8 @@ carried as fields, an unhandled error logs once at `error` with the stack, and
 everything else logs once at `info`. Per-serve `storeFallback` events fold into
 the request's wide event (`store: { served_from, reason, error? }`) plus a
 counter instead of a log line, so an outage flags on the wide event without a
-storm. Breaker open/close are lifecycle events and stay separate lines. Heavy
-tails stay deferred: sampling debug context per request is downstream homework.
+storm. Heavy tails stay deferred: sampling debug context per request is
+downstream homework.
 
 ---
 
@@ -218,7 +215,7 @@ behavior at request time.
   carries `allowed: false`, `remaining`, and `retryAfter`. The rate limit is
   exercised per hit, so the hot path stays exception-free.
 - **Infrastructure failures** (store down in `check`) — propagate as exceptions
-  and are absorbed by the circuit breaker's fail-open policy; consumers never
+  and are absorbed by `FailOpenStore`'s fail-open policy; consumers never
   catch per-request store errors in normal operation.
 
 ---
@@ -249,7 +246,7 @@ because sliding window never needs unconditional sets.
 
 ---
 
-## 6. Circuit Breaker
+## 6. Fail-Open Store (Embedded Circuit State)
 
 ```
 CLOSED (healthy) --N failures--> OPEN (fallback) --timeout--> HALF_OPEN (test) --M successes--> CLOSED
@@ -257,28 +254,30 @@ CLOSED (healthy) --N failures--> OPEN (fallback) --timeout--> HALF_OPEN (test) -
       └──────────────────────────── failure reopens → ──────────────────────────────────┘
 ```
 
+The circuit state machine lives **inside** `FailOpenStore`
+(`adapter/fail-open-store.ts`) — it is not a separate component:
+
 - **CLOSED:** checks go to Redis. Consecutive failures increment a counter.
 - **OPEN:** Redis skipped, in-memory fallback used. After a timeout → HALF_OPEN.
 - **HALF_OPEN:** one in-flight probe goes to Redis (concurrent calls short-circuit
   to the fallback instead of piling on). Success → CLOSED; failure → OPEN.
 
-Wired as `FailOpenStore` (`adapter/fail-open-store.ts`): a `Store` composing the
-primary (Redis), the breaker, and an in-memory fallback. Every operation runs
-through the breaker; on any failure — a tripped circuit or a throwing primary —
-it serves from the fallback, so requests are rate limited (from memory) rather
-than blocked. A **real primary failure logs one WARN** at the moment it is
-surfaced; requests short-circuited while the circuit is already OPEN fall back
-**silently** (`CircuitOpenError` is the sentinel), so an outage cannot turn into
-a per-request log storm. Recovery is automatic: the half-open probe decides
-whether to close the circuit and re-use Redis. `RedisStore` fails fast (bounded
-reconnect ending the client after a few attempts, `connectTimeout` + 2s
-`commandTimeout`) so a down or half-open Redis surfaces to the wrapper quickly
-instead of hanging commands behind an endless retry queue — and reconnects on
-demand for the next operation once Redis is back, so the half-open probe can
-genuinely re-seat it. Counts stored in the memory fallback during an outage are
-discarded on re-seat (the shared Redis resumes from its own, older counters) —
-a deliberate enforcement discontinuity, fail-open is about *availability*, not
-state continuity.
+`FailOpenStore` is a `Store` composing the primary (Redis) and an in-memory
+fallback, and every operation runs through its shared `guard()`: on any failure —
+a tripped circuit or a throwing primary — it serves from the fallback, so requests
+are rate limited (from memory) rather than blocked. A **real primary failure logs
+one WARN** at the moment it is surfaced; calls short-circuited while the circuit
+is already OPEN fall back **silently** (an internal branch, no sentinel type), so
+an outage cannot turn into a per-request log storm. Recovery is automatic: the
+half-open probe decides whether to close the circuit and re-use Redis.
+`RedisStore` fails fast (bounded reconnect ending the client after a few
+attempts, `connectTimeout` + 2s `commandTimeout`) so a down or half-open Redis
+surfaces to the wrapper quickly instead of hanging commands behind an endless
+retry queue — and reconnects on demand for the next operation once Redis is back,
+so the half-open probe can genuinely re-seat it. Counts stored in the memory
+fallback during an outage are discarded on re-seat (the shared Redis resumes from
+its own, older counters) — a deliberate enforcement discontinuity, fail-open is
+about *availability*, not state continuity.
 
 US-5's "logged, and metrics are updated" acceptance criterion is fully met:
 real primary failures WARN once (per request via the built-in `warn` hook, or
@@ -358,7 +357,7 @@ its subject (`*.test.ts` next to the module it tests).
 | event sink      | `src/domain/sliding-window.test.ts` (event describe block) | ruling `check` event carries bucket/ruleIndex/limit/remaining/reset/retryAfter |
 | demo logging    | `demo/src/logger.test.ts`            | level filtering, valid JSON, timestamp + service + context fields                                                         |
 | demo metrics    | `demo/src/metrics.test.ts`           | counters, allowed/throttled split, p50/p95/p99 histograms (check + store ops), reset, timed-store decorator, 100-request snapshot |
-| demo wide events| `demo/src/wide-event.test.ts`       | throttled → one `warn` wide event with bucket/rule/retryAfter/IP/requestId; store failure → `error` wide event with stack; fallback flagged without log storm (wide line + counters + breaker line only) |
+| demo wide events| `demo/src/wide-event.test.ts`       | throttled → one `warn` wide event with bucket/rule/retryAfter/IP/requestId; store failure → `error` wide event with stack; fallback flagged without log storm (one wide line + counters only) |
 | distributed stress | `demo/src/stress.test.ts`          | skips without Redis: two server instances sharing one Redis → 200 concurrent requests, exactly 100 allowed globally                                                         |
 | failover        | `demo/src/failover.test.ts`           | skips without Redis: TCP relay in front of Redis, mid-load outage → still served from fallback (+ rate-limit headers asserted), recovery → circuit re-seats on Redis      |
 

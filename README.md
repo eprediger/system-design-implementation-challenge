@@ -124,12 +124,13 @@ docker compose exec redis redis-cli ping   # confirm health
 REDIS_URL=redis://127.0.0.1:6379 npm start
 ```
 
-The limiter then backs on `FailOpenStore`: `RedisStore` behind a circuit
-breaker with an in-memory fallback. Kill Redis (`docker compose stop redis`)
-and requests keep flowing, rate limited from memory. A real primary failure
-logs one WARN as the circuit trips; while it stays open, fallback is silent (no
-per-request log spam). Restart Redis and the next half-open probe re-seats it —
-one in-flight probe at a time, concurrent calls wait on the fallback.
+The limiter then backs on `FailOpenStore`: an in-memory fallback in front of
+`RedisStore`, holding the circuit state itself. Kill Redis (`docker compose stop
+redis`) and requests keep flowing, rate limited from memory. A real primary
+failure logs one WARN as the circuit trips; while it stays open, fallback is
+silent (no per-request log spam). Restart Redis and the next half-open probe
+re-seats it — one in-flight probe at a time, concurrent calls wait on the
+fallback.
 
 By default the server only trusts `X-Forwarded-For` from a loopback client
 (Express `trust proxy: 'loopback'`), so a remote caller cannot spoof its way
@@ -146,16 +147,15 @@ curl -i -H 'X-Forwarded-For: 1.2.3.4' http://localhost:3000/api/route
 
 The demo runs US-7 observability on top of the library's `Emitter` event port
 (the library itself only emits; it takes no logging or metrics dependency).
-Wire the same `Emitter` into the limiter, circuit breaker, and fail-open store
-to attach your own mechanisms.
+Wire the same `Emitter` into the limiter and fail-open store to attach your own
+mechanisms.
 
 - **Logs** — one *wide event* per request, written once as the response
   finishes ([structured JSON](https://github.com/pinojs/pino), ISO timestamp):
   an allowed request logs `info`, a throttled one `warn` (with
   `rate_limit.bucket/rule/allowed/retry_after` plus `ip`, `request_id`,
-  `user_id`), and an unhandled error `error` with `error.stack`. Circuit-breaker
-  open/close stay separate lifecycle lines. Filter with `LOG_LEVEL` (default
-  `info`, e.g. `LOG_LEVEL=warn`).
+  `user_id`), and an unhandled error `error` with `error.stack`. Filter with
+  `LOG_LEVEL` (default `info`, e.g. `LOG_LEVEL=warn`).
 - **Metrics** — `GET /metrics` exposes a Prometheus scrape ([prom-client](https://prometheus.io/docs/guides/nodejs/)):
   counters `rate_limit_requests_total`, `rate_limit_allowed_total`,
   `rate_limit_throttled_total`, `rate_limit_errors_total{type}`, `rate_limit_fallback_total{reason}`,
@@ -170,10 +170,10 @@ to attach your own mechanisms.
 src/
   domain/sliding-window.ts   # core algorithm + rule vocabulary
   domain/rate-limit-result.ts # RateLimitResult value object
-  domain/ports.ts            # Store / Clock / IncrementResult ports
+  domain/ports.ts            # Store / IncrementResult ports
   domain/events.ts           # Emitter observability port (+ LimiterEvent union)
   domain/*.test.ts           # co-located tests
-  adapter/                   # ports' implementations (memory store, circuit breaker, fail-open store)
+  adapter/                   # ports' implementations (memory store, fail-open store)
   index.ts                   # composition root (public API)
 demo/src/
   server.ts                  # HTTP consumer (createApp with per-IP / per-endpoint rules)

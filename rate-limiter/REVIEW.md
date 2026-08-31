@@ -31,11 +31,10 @@ holes, and security-at-the-boundary issues.
 
 - `src/domain/sliding-window.ts` — algorithm, rules, limiter
 - `src/domain/rate-limit-result.ts` — value object + ruling comparison
-- `src/domain/ports.ts` — `Store` / `Clock` / `IncrementResult` ports
+- `src/domain/ports.ts` — `Store` / `IncrementResult` ports
 - `src/adapter/redis.ts` — Lua-backed store, reconnect-on-demand
 - `src/adapter/memory-store.ts` — in-memory fallback
-- `src/adapter/circuit-breaker.ts` — state machine
-- `src/adapter/fail-open-store.ts` — breaker + fallback wrapper
+- `src/adapter/fail-open-store.ts` — `Store` holding the circuit state (CLOSED/OPEN/HALF_OPEN) + in-memory fallback
 - `src/index.ts` — composition root (public API)
 - `demo/src/server.ts` — reference HTTP consumer (trust proxy, headers, 429)
 - Co-located tests + `demo/src/{server,stress,failover}.test.ts`
@@ -69,15 +68,15 @@ Read `src/domain/sliding-window.ts`, `src/domain/rate-limit-result.ts`, and
 their tests. Check:
 
 - The weighted blend: `effectiveCount = previous * (1 - weight) + current`
-  (sliding-window.ts:138-146). Is the weighting direction right at window
+  (sliding-window.ts:159-160). Is the weighting direction right at window
   start/end? Is `sectionWeight` correctly bounded `[0,1)`? What floats through
   when `windowMs` is huge/tiny, or `now` jumps (NTP step, clock skew)?
   **Both counters count *denied* attempts too** — verify a client can't erase
   its usage by overflowing into 429s.
 - `Math.floor(now / windowMs)` rollover and the `reset = Math.ceil(windowEnd/1000)`
-  (sliding-window.ts:101-105): seconds-vs-ms consistency, sub-second windows.
+  (sliding-window.ts:106-110): seconds-vs-ms consistency, sub-second windows.
 - `remaining = max(0, maxRequests - ceil(effectiveCount))` and
-  `allowed = effectiveCount <= maxRequests` (sliding-window.ts:144-145):
+  `allowed = effectiveCount <= maxRequests` (sliding-window.ts:164-165):
   off-by-one at exactly `maxRequests`, and the conservative/liberal boundary
   at non-integer effective counts. **Ceil is deliberate** — a decaying fraction
   must not read as a whole free hit (see DESIGN §9).
@@ -86,7 +85,7 @@ their tests. Check:
   limit wins; first rule keeps exact ties"). Is "denial beats allowed"
   consistent when an earlier denial and a later denial differ?
 - `RateLimiterConfigurationError` on empty rules and constructor invariants
-  (sliding-window.ts:83-91: `windowMs` finite positive, `maxRequests`
+  (sliding-window.ts:86-96: `windowMs` finite positive, `maxRequests`
   non-negative integer). Zero `maxRequests` behavior.
 - **Boundary reset vs US-1's wording:** the counter does *not* hard-reset at a
   boundary — US-1 is read implementation-neutrally ("the limit re-asserts as
@@ -103,7 +102,7 @@ Check:
 
 - The Lua script (redis.ts:7-13): is `INCR`+`PEXPIRE`+`GET` in `EVAL` atomic as
   claimed? Interleave scenarios between `INCR` and `GET` of the previous window.
-- Key composition `rl:<base64url id>:<windowIndex>` (redis.ts:29-35): ids are
+- Key composition `rl:<base64url id>:<windowIndex>` (redis.ts:34-40): ids are
   encoded before embedding so `:`/glob characters can't collide or leak; `reset`
   (redis.ts:102-104) deletes id-exact via the same codec. Unicode/long keys vs
   the US-8 edge cases.
@@ -113,7 +112,7 @@ Check:
 - Reconnect-on-demand (redis.ts:79-87): the `status === 'end'` branch — the
   in-flight `connect()` is memoized, so two concurrent `run()` calls can't
   connect twice; connection string/URL handling.
-- Atomic reset (RESET_SCRIPT, redis.ts:17-27, applied at 102-104): SCAN+DEL in
+- Atomic reset (RESET_SCRIPT, redis.ts:22-32, applied at 102-104): SCAN+DEL in
   one `EVAL` — atomicity of reset vs a concurrent increment; pipeline on an
   empty batch. **Scope: two-key `EVAL` is single-node/HA only — Redis Cluster
   would fail the increment script with CROSSSLOT (flag only if that matters).**
@@ -126,31 +125,31 @@ Check:
 
 ### M3 — Fault tolerance & timing
 
-Read `src/adapter/circuit-breaker.ts`, `src/adapter/fail-open-store.ts`,
-`src/adapter/fail-open-store.test.ts`, `demo/src/failover.test.ts`.
-Check:
+Read `src/adapter/fail-open-store.ts`, `src/adapter/fail-open-store.test.ts`,
+`demo/src/failover.test.ts`. Check:
 
-- The state machine (circuit-breaker.ts:64-96): failure counter reset on
-  success while CLOSED, half-open success accumulation, the `transitionToOpen`
-  resetting both counters (lines 64-70). Concurrency of `exec()`: the
-  single in-flight probe (lines 90-96) — two requests crossing the cooldown
-  boundary simultaneously — how many probes reach the dependency? Is that a
-  problem?
-- `recoveryTimeoutMs < 0` guard (circuit-breaker.ts:57-58) — is `0` meaningfully
-  "immediate probe"?
-- Fail-open semantics (fail-open-store.ts:41-46): on a tripped circuit,
-  `breaker.exec` throws `CircuitOpenError` and *every* short-circuited
-  operation falls back **silently** — the WARN fires once per *real primary
-  failure*, not per request, so an outage logs a few lines, not a storm
-  (DESIGN §6). Is that the intended US-5 logging? Fail-open on `reset` could
-  be surprising.
+- The circuit state machine now lives **inside** `FailOpenStore` (`fail-open-store.ts`):
+  `transitionToOpen` (lines 64-70), `transitionToClosed` (72-75), and the shared
+  `guard()` that every operation routes through (77-139). Failure counter reset
+  on success while CLOSED, half-open success accumulation, the `transitionToOpen`
+  resetting both counters (lines 64-70). Concurrency of `guard()`: the single
+  in-flight probe guarded by `probing` (lines 86-94) — two requests crossing the
+  cooldown boundary simultaneously — how many probes reach the primary? Is that
+  a problem?
+- The `recoveryTimeoutMs` cooldown guard (fail-open-store.ts:96-104): is a value
+  of `0` meaningfully "immediate probe"?
+- Fail-open semantics (fail-open-store.ts:135-137): on a tripped circuit the
+  shared `guard()` short-circuits to the fallback **silently**, and the WARN
+  fires once per *real primary failure*, not per request, so an outage logs a
+  few lines, not a storm (DESIGN §6). Is that the intended US-5 logging?
+  Fail-open on `reset` could be surprising.
 - The failover suite's relay: killing sockets mid-request — could a request
   hang rather than fail-fast (`.timeout` guards on every fetch)? The 600 ms
-  sleep (failover.test.ts:142) vs `recoveryTimeoutMs: 500` is a wall-clock race
+  sleep (failover.test.ts:139) vs `recoveryTimeoutMs: 500` is a wall-clock race
   the reviewer must assess.
-- Both app instances share ONE breaker (failover.test.ts:78): is that
-  global-vs-per-instance choice consistent with the degraded-per-instance
-  guarantee the README promises?
+- Both app instances share ONE `FailOpenStore` (built once, failover.test.ts:88,
+  reused for both apps at :99): is that global-vs-per-instance choice consistent
+  with the degraded-per-instance guarantee the README promises?
 
 ### M4 — Security at the boundary
 
@@ -174,9 +173,9 @@ Read `demo/src/server.ts`, `demo/src/server.test.ts`. Check:
   (seconds, per US-6) — consistency with `reset` (unix seconds)?
 - Unhandled middleware rejection: `await limiter.check(req)` throws if the
   store throws — Express 5 forwards async rejections, but is the 500 behavior
-  after a breaker-less store failure acceptable, or should the demo compose a
-  `FailOpenStore` on the default path too (currently opt-in via `REDIS_URL`,
-  server.ts:14-16)?
+  after a store failure acceptable in the `MemoryStore`-only path (no primary to
+  fail over from), given the failure arm of `FailOpenStore` is only wired when
+  `REDIS_URL` is set (server.ts:17-22)?
 
 ### M5 — Independent requirement traceability
 
@@ -220,8 +219,8 @@ ticked `✔ fixed` or documented `◐ accepted trade-off` / `✖ rejected` throu
 this file and DESIGN §9.
 
 - [x] Ran the full gate (lib + demo, with Redis) — recorded green
-  - lib `rate-limiter/`: 7 suites / 67 tests; `tsc --noEmit` clean
-  - demo `demo/`: 3 suites / 7 tests (incl. `stress`, `failover` against live
+  - lib `rate-limiter/`: 6 suites / 58 passed; `tsc --noEmit` clean
+  - demo `demo/`: 6 suites / 17 passed (incl. `stress`, `failover` against live
     Redis via `--network host`)
 - [x] Stepped a real request through `curl` with `X-Forwarded-For` — headers match US-6
   - 10 hits → 200 with `X-RateLimit-Limit: 10`, `Remaining` 9→0, consistent
@@ -229,7 +228,7 @@ this file and DESIGN §9.
     fresh XFF client and no-XFF client each got their own bucket (isolation).
 - [x] Killed Redis mid-flight (`demo` with `REDIS_URL`) — requests keep flowing, WARNs seen
   - `docker compose stop redis` → 5/5 requests still 200 (memory fallback);
-    exactly 3 WARN lines (one per real failure as the breaker tripped), then
+    exactly 3 WARN lines (one per real failure as the circuit opened), then
     silence — no per-request storm. `docker compose start redis` → after the
     cooldown a fresh client's counters land in Redis again (circuit re-seated);
     outage counts discarded (documented §6 discontinuity).
