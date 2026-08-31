@@ -1,6 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import {
-  CircuitBreaker,
   FailOpenStore,
   MemoryStore,
   RedisStore,
@@ -19,8 +18,10 @@ function makeStore(events?: Emitter): Store {
   if (!url) return new MemoryStore();
   return new FailOpenStore({
     primary: new RedisStore(url),
-    breaker: new CircuitBreaker({ failureThreshold: 3, recoveryTimeoutMs: 30_000, successThreshold: 1, events }),
     fallback: new MemoryStore(),
+    failureThreshold: 3,
+    recoveryTimeoutMs: 30_000,
+    successThreshold: 1,
     events,
   });
 }

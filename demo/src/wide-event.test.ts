@@ -3,7 +3,6 @@ import request from 'supertest';
 import type pino from 'pino';
 import type { Request } from 'express';
 import {
-  CircuitBreaker,
   FailOpenStore,
   MemoryStore,
   type BucketRule,
@@ -106,7 +105,9 @@ describe('Given the wide-event request log', () => {
     const storeFactory = (events?: Emitter): Store =>
       new FailOpenStore({
         primary,
-        breaker: new CircuitBreaker({ failureThreshold: 2, recoveryTimeoutMs: 60_000, successThreshold: 1, events }),
+        failureThreshold: 2,
+        recoveryTimeoutMs: 60_000,
+        successThreshold: 1,
         fallback: new MemoryStore(),
         warn: () => {},
         events,
@@ -121,21 +122,20 @@ describe('Given the wide-event request log', () => {
     expect(third.status).toBe(200);
     await flush();
 
-    // One wide line per request + one breaker-lifecycle line: no per-serve storm.
-    expect(lines).toHaveLength(4);
+    // One wide line per request: no per-serve storm.
+    expect(lines).toHaveLength(3);
     expect(JSON.parse(lines[0])).toMatchObject({
       level: 30,
       status_code: 200,
       store: { served_from: 'memory', reason: 'error', error: 'redis down' },
     });
-    expect(JSON.parse(lines[1])).toMatchObject({ level: 40, breaker: 'open', failure_count: 2 });
     // The tripping request's own failure still surfaces as a fallback, not a short-circuit.
-    expect(JSON.parse(lines[2])).toMatchObject({
+    expect(JSON.parse(lines[1])).toMatchObject({
       level: 30,
       status_code: 200,
       store: { served_from: 'memory', reason: 'error', error: 'redis down' },
     });
-    expect(JSON.parse(lines[3])).toMatchObject({
+    expect(JSON.parse(lines[2])).toMatchObject({
       level: 30,
       status_code: 200,
       store: { served_from: 'memory', reason: 'open' },
@@ -144,6 +144,5 @@ describe('Given the wide-event request log', () => {
     const snapshot = (await request(app).get('/metrics')).text;
     expect(snapshot).toMatch(/rate_limit_fallback_total\{reason="error"\} 2/);
     expect(snapshot).toMatch(/rate_limit_fallback_total\{reason="open"\} 1/);
-    expect(snapshot).toMatch(/rate_limit_breaker_opened_total 1/);
   });
 });

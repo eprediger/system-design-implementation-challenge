@@ -2,7 +2,6 @@ import Redis from 'ioredis';
 import net from 'node:net';
 import { RedisStore } from './redis';
 import { FailOpenStore } from './fail-open-store';
-import { CircuitBreaker } from './circuit-breaker';
 import { MemoryStore } from './memory-store';
 import { encodeBucketId } from './bucket-id';
 import { redisAvailable } from '../../jest/redis-available';
@@ -74,7 +73,9 @@ describeRedis('Given a Redis-backed store', () => {
   it('serves through a fail-open store while Redis is reachable', async () => {
     const failOpen = new FailOpenStore({
       primary: new RedisStore(url),
-      breaker: new CircuitBreaker({ failureThreshold: 2, recoveryTimeoutMs: 30_000, successThreshold: 1 }),
+      failureThreshold: 2,
+      recoveryTimeoutMs: 30_000,
+      successThreshold: 1,
       fallback: new MemoryStore(),
       warn: () => {},
     });
@@ -89,7 +90,9 @@ describeRedis('Given a Redis-backed store', () => {
     const liveIndex = Math.floor(Date.now() / windowMs);
     const failOpen = new FailOpenStore({
       primary: new RedisStore('redis://127.0.0.1:6399'),
-      breaker: new CircuitBreaker({ failureThreshold: 2, recoveryTimeoutMs: 30_000, successThreshold: 1 }),
+      failureThreshold: 2,
+      recoveryTimeoutMs: 30_000,
+      successThreshold: 1,
       fallback: new MemoryStore(),
       warn: (m) => warns.push(m),
     });
