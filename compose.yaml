@@ -1,9 +1,6 @@
 services:
   redis:
     image: redis:7-alpine
-    network_mode: host
-    ports:
-      - "6379:6379"
     volumes:
       - rl-redis:/data
     healthcheck:
@@ -14,22 +11,20 @@ services:
 
   demo:
     image: node:24-slim
-    network_mode: host
     working_dir: /app
     volumes:
       - ./demo:/app
     ports:
       - "3000:3000"
     environment:
-      - REDIS_URL=redis://host.docker.internal:6379
+      - REDIS_URL=redis://redis:6379
     depends_on:
       redis:
         condition: service_healthy
-    command: node dist/server.js
+    command: sh -c "npm run build && node dist/server.js"
 
   prometheus:
     image: prom/prometheus:latest
-    network_mode: host
     volumes:
       - ./prometheus:/etc/prometheus
     ports:
