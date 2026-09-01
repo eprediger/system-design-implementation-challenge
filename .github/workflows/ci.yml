@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  ci:
+  rate-limiter:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,4 +26,40 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      - run: npm test
+      - run: npm run test:coverage
+      - name: Upload coverage to Coveralls
+        if: github.event_name == 'push'
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: rate-limiter/coverage/lcov.info
+
+  demo:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - "6379:6379"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - name: Install lib deps
+        run: npm ci
+        working-directory: rate-limiter
+      - name: Pack the lib and install the demo
+        run: npm run demo:install
+        working-directory: demo
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: demo
+      - name: Build
+        run: npm run build
+        working-directory: demo
+      - name: Test
+        run: npm test
+        working-directory: demo
