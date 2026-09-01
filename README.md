@@ -1,5 +1,7 @@
 # Rate Limiter
 
+[![Coverage Status](https://coveralls.io/repos/github/eprediger/system-design-implementation-challenge/badge.svg?branch=main)](https://coveralls.io/github/eprediger/system-design-implementation-challenge?branch=main)
+
 Server-side API rate limiter (sliding window counter). Implementation and specs live in `rate-limiter/`; architecture and
 decisions are recorded in [`rate-limiter/DESIGN.md`](rate-limiter/DESIGN.md).
 
