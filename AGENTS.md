@@ -2,7 +2,7 @@
 
 ## Project
 
-Server-side API rate limiter (TypeScript). Solution lives in `rate-limiter/`; specs are in `rate-limiter/specs/US-*.md`. Entry point / public API is `src/index.ts`. Human-facing run docs: root `README.md`.
+Server-side API rate limiter (TypeScript). Solution lives in `rate-limiter/`; specs are in `rate-limiter/specs/US-*.md`. Entry point / public API is `src/index.ts`. Human-facing run docs: root `README.md`; demo runtime docs live in `demo/README.md`.
 
 ## Commands (run from `rate-limiter/`)
 

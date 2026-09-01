@@ -15,9 +15,10 @@ services:
     volumes:
       - ./demo:/app
     ports:
-      - "3000:3000"
+      - "${DEMO_PORT:-3000}:3000"
     environment:
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - PORT=3000
     depends_on:
       redis:
         condition: service_healthy
@@ -28,7 +29,7 @@ services:
     volumes:
       - ./prometheus:/etc/prometheus
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
     depends_on:

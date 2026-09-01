@@ -1,8 +1,14 @@
 import request from 'supertest';
 import type { Request } from 'express';
-import type { BucketRule } from 'rate-limiter';
+import type { BucketRule, Emitter } from 'rate-limiter';
 import { createMetrics, timedStore } from './metrics';
-import { createApp } from './server';
+import { createApp, makeStore } from './server';
+import { createLogger } from './logger';
+import { readConfig } from './config';
+
+const config = readConfig(process.env);
+const storeFactory = (events?: Emitter) => makeStore(config, events);
+const logger = createLogger({ level: 'silent' });
 
 describe('Given the prometheus registry based metrics', () => {
   it('counters increment and allowed/throttled are tracked separately', async () => {
@@ -79,7 +85,7 @@ describe('Given the prometheus registry based metrics', () => {
     const rules: Array<BucketRule<Request>> = [
       { bucketOf: () => 'all', rule: { windowMs: 60_000, maxRequests: 10_000 } },
     ];
-    const app = createApp(rules);
+    const app = createApp(rules, config, storeFactory, logger);
     for (let i = 0; i < 100; i++) {
       const res = await request(app).get('/api/route');
       expect(res.status).toBe(200);

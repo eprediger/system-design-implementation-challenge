@@ -1,22 +1,19 @@
 import { Writable } from 'node:stream';
 import { createLogger } from './logger';
 import type pino from 'pino';
+import type { LogLevel } from './config';
 
-function capture(level?: string) {
-  const prev = process.env.LOG_LEVEL;
-  if (level === undefined) delete process.env.LOG_LEVEL;
-  else process.env.LOG_LEVEL = level;
+function capture(level: LogLevel) {
   const lines: string[] = [];
-  const logger = createLogger(
-    new Writable({
+  const logger = createLogger({
+    level,
+    destination: new Writable({
       write(chunk: Buffer, _enc: unknown, cb: () => void) {
         lines.push(chunk.toString());
         cb();
       },
     }) as pino.DestinationStream,
-  );
-  if (prev === undefined) delete process.env.LOG_LEVEL;
-  else process.env.LOG_LEVEL = prev;
+  });
   return { lines, logger };
 }
 

@@ -9,23 +9,29 @@ import {
   type Emitter,
   type Store,
 } from 'rate-limiter';
-import { createApp } from './server';
+import { createApp, makeStore } from './server';
 import { createLogger } from './logger';
+import { readConfig } from './config';
+
+const config = readConfig(process.env);
 
 const allRules: Array<BucketRule<Request>> = [
   { bucketOf: () => 'global', rule: { windowMs: 60_000, maxRequests: 10_000 } },
 ];
 
+const defaultStoreFactory = (events?: Emitter): Store => makeStore(config, events);
+
 function captureLines() {
   const lines: string[] = [];
-  const logger = createLogger(
-    new Writable({
+  const logger = createLogger({
+    level: 'info',
+    destination: new Writable({
       write(chunk: Buffer, _enc: unknown, cb: () => void) {
         lines.push(chunk.toString());
         cb();
       },
     }) as pino.DestinationStream,
-  );
+  });
   return { lines, logger };
 }
 
@@ -37,7 +43,7 @@ describe('Given the wide-event request log', () => {
     const rules: Array<BucketRule<Request>> = [
       { bucketOf: (req) => req.ip ?? 'unknown', rule: { windowMs: 60_000, maxRequests: 2 } },
     ];
-    const app = createApp(rules, undefined, logger);
+    const app = createApp(rules, config, defaultStoreFactory, logger);
 
     const first = await request(app).get('/api/route').set('X-Forwarded-For', '10.0.0.1');
     expect(first.status).toBe(200);
@@ -81,7 +87,7 @@ describe('Given the wide-event request log', () => {
       ping: () => Promise.resolve(true),
       close: () => Promise.resolve(),
     };
-    const app = createApp(allRules, () => failing, logger);
+    const app = createApp(allRules, config, () => failing, logger);
 
     const res = await request(app).get('/api/route');
     expect(res.status).toBe(500);
@@ -112,7 +118,7 @@ describe('Given the wide-event request log', () => {
         warn: () => {},
         events,
       });
-    const app = createApp(allRules, storeFactory, logger);
+    const app = createApp(allRules, config, storeFactory, logger);
 
     const first = await request(app).get('/api/route');
     const second = await request(app).get('/api/route');

@@ -12,16 +12,18 @@ import type { AppLogger } from './logger';
 import { createLogger } from './logger';
 import { createMetrics, timedStore, type DemoMetrics } from './metrics';
 import { createEmitter, newWideEvent, requestCtx, type WideEvent } from './wide-event';
+import { readConfig, type DemoConfig } from './config';
 
-function makeStore(events?: Emitter): Store {
-  const url = process.env.REDIS_URL;
+/** Default store for a config: in-memory, or Redis behind the fail-open circuit. */
+export function makeStore(config: DemoConfig, events?: Emitter): Store {
+  const url = config.redisUrl;
   if (!url) return new MemoryStore();
   return new FailOpenStore({
     primary: new RedisStore(url),
     fallback: new MemoryStore(),
-    failureThreshold: 3,
-    recoveryTimeoutMs: 30_000,
-    successThreshold: 1,
+    failureThreshold: config.failOver.failureThreshold,
+    recoveryTimeoutMs: config.failOver.recoveryTimeoutMs,
+    successThreshold: config.failOver.successThreshold,
     events,
   });
 }
@@ -43,26 +45,26 @@ function perIpEndpointBucket(req: Request): string {
 }
 
 /**
- * Build the demo Express app. `storeFactory(events)` lets callers substitute a
- * store while still receiving the observability event sink; an injected
- * `logger` replaces the default pino instance.
+ * Build the demo Express app. `config` is the validated environment
+ * configuration; `storeFactory(events)` provides the store while still
+ * receiving the observability event sink; `logger` is the pino instance used
+ * for request logs. Callers wire both explicitly — no defaults.
  */
 export function createApp(
   rules: Array<BucketRule<Request>>,
-  storeFactory: (events?: Emitter) => Store = makeStore,
-  logger?: AppLogger,
+  config: DemoConfig,
+  storeFactory: (events?: Emitter) => Store,
+  logger: AppLogger,
 ) {
-  const appLogger = logger ?? createLogger();
-  if (!logger && process.env.NODE_ENV === 'test') appLogger.level = 'silent';
   const app = express();
   // Only trust the proxy's X-Forwarded-For when the request is loopback, a
   // remote client cannot spoof per-IP limits. Consumers behind a real proxy
   // set TRUST_PROXY=true.
-  app.set('trust proxy', process.env.TRUST_PROXY === 'true' ? true : 'loopback');
+  app.set('trust proxy', config.trustProxy ? true : 'loopback');
   app.disable('x-powered-by');
 
   const metrics: DemoMetrics = createMetrics();
-  const emitter = createEmitter(metrics, appLogger, rules);
+  const emitter = createEmitter(metrics, logger, rules);
   const store = timedStore(storeFactory(emitter), metrics.storeOpMs);
   const limiter = new SlidingWindowLimiter({ store, rules, events: emitter });
 
@@ -77,9 +79,9 @@ export function createApp(
     res.on('finish', () => {
       const code = res.statusCode;
       const line: WideEvent = { ...wide, status_code: code, duration_ms: Math.round(performance.now() - started) };
-      if (code >= 500) appLogger.error(line, 'request errored');
-      else if (code === 429) appLogger.warn(line, 'request throttled');
-      else appLogger.info(line, 'request handled');
+      if (code >= 500) logger.error(line, 'request errored');
+      else if (code === 429) logger.warn(line, 'request throttled');
+      else logger.info(line, 'request handled');
     });
     return requestCtx.run({ wide }, () => handle(limiter, metrics, req, res, next, started));
   });
@@ -131,13 +133,20 @@ async function handle(
 }
 
 if (require.main === module) {
-  const port = Number(process.env.PORT ?? 3000);
-  createApp([
-    { bucketOf: () => 'global', rule: { windowMs: 60_000, maxRequests: 1000 } },
-    { bucketOf: (req: Request) => req.ip ?? 'unknown', rule: { windowMs: 60_000, maxRequests: 100 } },
-    {
-      bucketOf: perIpEndpointBucket,
-      rule: { windowMs: 60_000, maxRequests: 10 },
-    },
-  ]).listen(port, () => console.log(`demo listening on :${port}`));
+  const config = readConfig(process.env);
+  const logger = createLogger({ level: config.logLevel });
+  const storeFactory = (events?: Emitter): Store => makeStore(config, events);
+  createApp(
+    [
+      { bucketOf: () => 'global', rule: { windowMs: 60_000, maxRequests: 1000 } },
+      { bucketOf: (req: Request) => req.ip ?? 'unknown', rule: { windowMs: 60_000, maxRequests: 100 } },
+      {
+        bucketOf: perIpEndpointBucket,
+        rule: { windowMs: 60_000, maxRequests: 10 },
+      },
+    ],
+    config,
+    storeFactory,
+    logger,
+  ).listen(config.port, () => console.log(`demo listening on :${config.port}`));
 }

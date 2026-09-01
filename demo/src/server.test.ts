@@ -1,7 +1,14 @@
 import request from 'supertest';
 import type { Request } from 'express';
 import type { BucketRule } from 'rate-limiter';
-import { createApp, normalizePath } from './server';
+import { createApp, makeStore, normalizePath } from './server';
+import { createLogger } from './logger';
+import { readConfig } from './config';
+import type { Emitter } from 'rate-limiter';
+
+const config = readConfig(process.env);
+const storeFactory = (events?: Emitter) => makeStore(config, events);
+const logger = createLogger({ level: 'silent' });
 
 const perIp: BucketRule<Request> = {
   bucketOf: (req) => req.ip ?? 'unknown',
@@ -14,7 +21,7 @@ const perIpEndpoint: BucketRule<Request> = {
   rule: { windowMs: 60_000, maxRequests: 2 },
 };
 
-const app = createApp([perIp, perIpEndpoint]);
+const app = createApp([perIp, perIpEndpoint], config, storeFactory, logger);
 
 const get = (ip: string, path = '/api/route') =>
   request(app).get(path).set('X-Forwarded-For', ip);

@@ -4,9 +4,13 @@ import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import { FailOpenStore, MemoryStore, RedisStore, type BucketRule, type Store } from 'rate-limiter';
 import { createApp } from './server';
+import { createLogger } from './logger';
+import { readConfig } from './config';
 import { redisAvailable } from '../jest/redis-available';
 
 const describeRedis = redisAvailable ? describe : describe.skip;
+const config = readConfig(process.env);
+const logger = createLogger({ level: 'silent' });
 
 const perIp: BucketRule<Request> = {
   bucketOf: (req) => req.ip ?? 'unknown',
@@ -96,7 +100,7 @@ describeRedis('Given two server instances whose Redis is fronted by a fault-inje
       failOpens.push(store);
       return store;
     };
-    apps = [createApp([perIp], storeFactory), createApp([perIp], storeFactory)];
+    apps = [createApp([perIp], config, storeFactory, logger), createApp([perIp], config, storeFactory, logger)];
   });
 
   afterAll(async () => {

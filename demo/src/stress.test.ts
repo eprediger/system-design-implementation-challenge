@@ -3,11 +3,15 @@ import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import { RedisStore, type BucketRule, type Store } from 'rate-limiter';
 import { createApp } from './server';
+import { createLogger } from './logger';
+import { readConfig } from './config';
 import { redisAvailable } from '../jest/redis-available';
 
 const describeRedis = redisAvailable ? describe : describe.skip;
 
 const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+const config = readConfig(process.env);
+const logger = createLogger({ level: 'silent' });
 
 const perIp: BucketRule<Request> = {
   bucketOf: (req) => req.ip ?? 'unknown',
@@ -23,7 +27,7 @@ describeRedis('Given two server instances sharing one Redis', () => {
       stores.push(store);
       return store;
     };
-    const apps = [createApp([perIp], storeFactory), createApp([perIp], storeFactory)];
+    const apps = [createApp([perIp], config, storeFactory, logger), createApp([perIp], config, storeFactory, logger)];
 
     try {
       const responses = await Promise.all(
